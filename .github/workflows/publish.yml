@@ -32,4 +32,4 @@ jobs:
         run: node scripts/check-release-tag.mjs
       - name: Publish
         working-directory: packages/openrouter-observability
-        run: npm publish
+        run: npm publish --provenance

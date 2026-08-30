@@ -395,6 +395,41 @@ describe("OpenRouter Broadcast OTLP parser", () => {
     expect(span?.attributes.map(({ key }) => key)).toEqual(["trace.input", "span.input"]);
   });
 
+  it("preserves unprojected resource attributes in source order", () => {
+    const delivery = {
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [
+              { key: "service.name", value: { stringValue: "openrouter" } },
+              { key: "cloud.region", value: { stringValue: "us-east-1" } },
+              { key: "openrouter.trace.id", value: { stringValue: "generation-123" } },
+              { key: "deployment.environment", value: { stringValue: "preview" } },
+            ],
+          },
+          scopeSpans: [
+            {
+              spans: [{ traceId: "trace", spanId: "span", name: "resource metadata" }],
+            },
+          ],
+        },
+      ],
+    };
+
+    const [span] = parseOpenRouterOtlpDelivery(delivery);
+    expect(span).toMatchObject({
+      serviceName: "openrouter",
+      openrouterTraceId: "generation-123",
+      resourceAttributes: [
+        { key: "cloud.region", valueJson: JSON.stringify({ stringValue: "us-east-1" }) },
+        {
+          key: "deployment.environment",
+          valueJson: JSON.stringify({ stringValue: "preview" }),
+        },
+      ],
+    });
+  });
+
   it.each([
     {},
     { resourceSpans: [{}] },

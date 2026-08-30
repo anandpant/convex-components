@@ -221,6 +221,7 @@ describe("OpenRouter observability component", () => {
           spanId: `expired-span-${index}`,
           name: "expired",
           attributes: [],
+          resourceAttributes: [],
           receivedAt: 1,
         });
       }
@@ -229,6 +230,7 @@ describe("OpenRouter observability component", () => {
         spanId: "current-span",
         name: "current",
         attributes: [],
+        resourceAttributes: [],
         receivedAt: 10_000,
       });
     });

@@ -64,6 +64,7 @@ export type ParsedOpenRouterSpan = {
   input?: string;
   output?: string;
   attributes: Array<StoredAttribute>;
+  resourceAttributes: Array<StoredAttribute>;
   eventsJson?: string;
   linksJson?: string;
   statusJson?: string;
@@ -345,10 +346,19 @@ function serializeOptionalField(record: JsonRecord, key: string, path: string) {
   return JSON.stringify(value);
 }
 
-function resourceProjection(attributes: ReadonlyArray<OtlpAttribute>, key: string) {
-  const matches = attributes.filter((attribute) => attribute.key === key);
-  if (matches.length !== 1) return undefined;
-  return typedString(matches[0]?.value ?? {});
+function extractResourceAttributes(attributes: ReadonlyArray<OtlpAttribute>) {
+  const consumed = new Set<number>();
+  const serviceName = projectValue(attributes, consumed, "service.name", typedString);
+  const openrouterTraceId = projectValue(attributes, consumed, "openrouter.trace.id", typedString);
+  return {
+    serviceName,
+    openrouterTraceId,
+    resourceAttributes: attributes.flatMap((attribute, index) =>
+      consumed.has(index)
+        ? []
+        : [{ key: attribute.key, valueJson: JSON.stringify(attribute.value) }],
+    ),
+  };
 }
 
 function extractSpan(
@@ -366,6 +376,7 @@ function extractSpan(
   const eventsJson = serializeOptionalField(span, "events", path);
   const linksJson = serializeOptionalField(span, "links", path);
   const statusJson = serializeOptionalField(span, "status", path);
+  const resource = extractResourceAttributes(resourceAttributes);
 
   return {
     traceId: requireString(span.traceId, `${path}.traceId`),
@@ -375,8 +386,7 @@ function extractSpan(
     kind: optionalNumber(span, "kind", path),
     startTimeUnixNano: optionalString(span, "startTimeUnixNano", path),
     endTimeUnixNano: optionalString(span, "endTimeUnixNano", path),
-    serviceName: resourceProjection(resourceAttributes, "service.name"),
-    openrouterTraceId: resourceProjection(resourceAttributes, "openrouter.trace.id"),
+    ...resource,
     ...projections,
     input,
     output,

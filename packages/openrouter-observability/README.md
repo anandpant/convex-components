@@ -89,7 +89,7 @@ The client exposes `getTrace`, `getSpan`, `listBySession`, `listByUser`, `listBy
 - OTLP resource spans, scope spans, spans, attributes, events, and links have explicit count limits.
 - A delivery writes all new spans in one mutation. Invalid input writes nothing.
 - `(traceId, spanId)` identifies duplicates. New deliveries return `202`; duplicate-only deliveries return `204`.
-- Known correlation, model, token, and cost values get typed columns. Unknown attributes retain their order and original OTLP typed values as JSON.
+- Known correlation, model, token, and cost values get typed columns. Unknown span and resource attributes retain their order and original OTLP typed values as JSON.
 - The component does not keep raw webhook bodies.
 
 Host applications should use opaque identifiers for OpenRouter `user`, `session_id`, request, and entity metadata. Avoid putting direct personal data in trace attributes.

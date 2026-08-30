@@ -5,11 +5,12 @@
   "packageManager": "pnpm@10.15.0",
   "scripts": {
     "build": "pnpm --filter @anandpant/convex-openrouter-observability build",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm pack:check",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm release:test && pnpm pack:check",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "pack:check": "pnpm --filter @anandpant/convex-openrouter-observability pack:check",
+    "release:test": "node --test scripts/check-release-tag.test.mjs",
     "test": "pnpm --filter @anandpant/convex-openrouter-observability test",
     "typecheck": "pnpm --filter @anandpant/convex-openrouter-observability typecheck"
   },

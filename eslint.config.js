@@ -28,7 +28,6 @@ export default [
     },
     rules: {
       ...convexPlugin.configs.recommended[0].rules,
-      "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-floating-promises": "error",
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
       "no-unused-vars": "off",
@@ -41,7 +40,7 @@ export default [
     },
   },
   {
-    files: ["packages/**/scripts/*.mjs"],
+    files: ["scripts/*.mjs", "packages/**/scripts/*.mjs"],
     languageOptions: { globals: globals.node },
   },
 ];

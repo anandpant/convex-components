@@ -44,6 +44,15 @@
   },
   "types": "./dist/client.d.ts",
   "module": "./dist/client.js",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "sideEffects": false,
   "scripts": {
     "build": "tsc6 --project tsconfig.build.json",
     "build:clean": "rm -rf dist *.tsbuildinfo && pnpm build",
@@ -54,7 +63,7 @@
     "typecheck": "tsc6 --noEmit && tsc6 --noEmit --project tsconfig.test.json && tsc6 --noEmit --project example/tsconfig.json"
   },
   "peerDependencies": {
-    "convex": "^1.45.0"
+    "convex": "^1.42.2"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",

@@ -13,6 +13,7 @@ if (tarballs.length !== 1)
 const tarball = join(packDirectory, tarballs[0]);
 const entries = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
 for (const required of [
+  "package/LICENSE",
   "package/dist/client.js",
   "package/dist/client.d.ts",
   "package/dist/component/convex.config.js",
@@ -34,10 +35,10 @@ try {
       type: "module",
       dependencies: {
         "@anandpant/convex-openrouter-observability": `file:${tarball}`,
-        convex: "^1.45.0",
+        convex: "1.42.2",
       },
       devDependencies: {
-        "convex-test": "^0.0.56",
+        "convex-test": "0.0.54",
         typescript: "npm:@typescript/typescript6@^6.0.2",
         vite: "^8.2.2",
         vitest: "^4.1.11",

@@ -1,3 +1,5 @@
+import { getConvexSize } from "convex/values";
+
 const OPENROUTER_OTLP_LIMITS = {
   resourceSpans: 64,
   scopeSpans: 64,
@@ -6,6 +8,8 @@ const OPENROUTER_OTLP_LIMITS = {
   events: 16,
   links: 16,
 } as const;
+
+const MAX_STORED_SPAN_BYTES = 900 * 1024;
 
 export type StoredAttribute = {
   key: string;
@@ -363,7 +367,7 @@ function extractResourceAttributes(attributes: ReadonlyArray<OtlpAttribute>) {
 
 function extractSpan(
   spanValue: unknown,
-  resourceAttributes: ReadonlyArray<OtlpAttribute>,
+  resource: ReturnType<typeof extractResourceAttributes>,
   path: string,
 ): ParsedOpenRouterSpan {
   const span = requireRecord(spanValue, path);
@@ -376,8 +380,6 @@ function extractSpan(
   const eventsJson = serializeOptionalField(span, "events", path);
   const linksJson = serializeOptionalField(span, "links", path);
   const statusJson = serializeOptionalField(span, "status", path);
-  const resource = extractResourceAttributes(resourceAttributes);
-
   return {
     traceId: requireString(span.traceId, `${path}.traceId`),
     spanId: requireString(span.spanId, `${path}.spanId`),
@@ -414,7 +416,9 @@ export function parseOpenRouterOtlpDelivery(value: unknown) {
       resourceSpan.resource === undefined
         ? undefined
         : requireRecord(resourceSpan.resource, `${path}.resource`);
-    const resourceAttributes = parseAttributes(resource?.attributes, `${path}.resource.attributes`);
+    const resourceAttributes = extractResourceAttributes(
+      parseAttributes(resource?.attributes, `${path}.resource.attributes`),
+    );
     const scopeSpans = requireArray(resourceSpan.scopeSpans, `${path}.scopeSpans`);
     scopeSpanCount += scopeSpans.length;
     checkCount(scopeSpanCount, OPENROUTER_OTLP_LIMITS.scopeSpans, "delivery scopeSpans");
@@ -430,7 +434,19 @@ export function parseOpenRouterOtlpDelivery(value: unknown) {
       }
     }
   }
+  for (const span of parsedSpans) {
+    const spanBytes = getConvexSize({ ...span, receivedAt: 0 });
+    if (spanBytes > MAX_STORED_SPAN_BYTES) {
+      throw new OtlpBoundExceededError(
+        `stored span exceeds the limit of ${MAX_STORED_SPAN_BYTES} bytes`,
+      );
+    }
+  }
   return parsedSpans;
+}
+
+export function storedOpenRouterSpanSize(span: ParsedOpenRouterSpan) {
+  return getConvexSize({ ...span, receivedAt: 0 });
 }
 
 export function assertSpanAttributeReconstruction(

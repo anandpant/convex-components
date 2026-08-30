@@ -27,7 +27,14 @@ export const deleteExpired = internalMutation({
       .withIndex("by_received", (query) => query.lt("receivedAt", args.cutoff))
       .order("asc")
       .take(DELETE_BATCH_SIZE);
-    for (const span of spans) await ctx.db.delete("spans", span._id);
+    for (const span of spans) {
+      const key = await ctx.db
+        .query("spanKeys")
+        .withIndex("by_span_document", (query) => query.eq("spanDocumentId", span._id))
+        .unique();
+      if (key) await ctx.db.delete("spanKeys", key._id);
+      await ctx.db.delete("spans", span._id);
+    }
     if (spans.length === DELETE_BATCH_SIZE) {
       await ctx.scheduler.runAfter(0, internal.retention.deleteExpired, args);
     }

@@ -95,7 +95,62 @@ describe("OpenRouter observability component", () => {
       ],
     };
     expect((await post(backend, JSON.stringify(tooManySpans))).status).toBe(413);
+    const expandedResourceAttributes = {
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: "large.resource", value: { stringValue: "x".repeat(200 * 1024) } }],
+          },
+          scopeSpans: [
+            {
+              spans: Array.from({ length: 64 }, (_, index) => ({
+                traceId: "trace",
+                spanId: `span-${index}`,
+                name: "expanded resource metadata",
+              })),
+            },
+          ],
+        },
+      ],
+    };
+    expect((await post(backend, JSON.stringify(expandedResourceAttributes))).status).toBe(413);
     expect(await storedSpans(backend)).toHaveLength(0);
+  });
+
+  it("accepts a duplicate-only expanded delivery without rewriting spans", async () => {
+    const backend = createBackend();
+    const expandedDelivery = {
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: "large.resource", value: { stringValue: "x".repeat(200 * 1024) } }],
+          },
+          scopeSpans: [
+            {
+              spans: Array.from({ length: 64 }, (_, index) => ({
+                traceId: "trace",
+                spanId: `span-${index}`,
+                name: "expanded resource metadata",
+              })),
+            },
+          ],
+        },
+      ],
+    };
+    const parsed = parseOpenRouterOtlpDelivery(expandedDelivery);
+    await backend.run(async (ctx) => {
+      for (const span of parsed) {
+        const spanDocumentId = await ctx.db.insert("spans", { ...span, receivedAt: 0 });
+        await ctx.db.insert("spanKeys", {
+          traceId: span.traceId,
+          spanId: span.spanId,
+          spanDocumentId,
+        });
+      }
+    });
+
+    expect((await post(backend, JSON.stringify(expandedDelivery))).status).toBe(204);
+    expect(await storedSpans(backend)).toHaveLength(64);
   });
 
   it("accepts authenticated Test Connection with no write", async () => {
@@ -142,6 +197,27 @@ describe("OpenRouter observability component", () => {
       ),
     ).toBe(2);
     expect(await storedSpans(freshBackend)).toHaveLength(2);
+  });
+
+  it("does not collapse distinct trace and span ID pairs", async () => {
+    const backend = createBackend();
+    const body = JSON.stringify({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                { traceId: "a\u0000b", spanId: "c", name: "first" },
+                { traceId: "a", spanId: "b\u0000c", name: "second" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect((await post(backend, body)).status).toBe(202);
+    expect(await storedSpans(backend)).toHaveLength(2);
   });
 
   it("does not invent missing content for a privacy-redacted delivery", async () => {
@@ -216,7 +292,7 @@ describe("OpenRouter observability component", () => {
     const backend = createBackend();
     await backend.run(async (ctx) => {
       for (let index = 0; index < 257; index += 1) {
-        await ctx.db.insert("spans", {
+        const spanDocumentId = await ctx.db.insert("spans", {
           traceId: `expired-trace-${index}`,
           spanId: `expired-span-${index}`,
           name: "expired",
@@ -224,14 +300,24 @@ describe("OpenRouter observability component", () => {
           resourceAttributes: [],
           receivedAt: 1,
         });
+        await ctx.db.insert("spanKeys", {
+          traceId: `expired-trace-${index}`,
+          spanId: `expired-span-${index}`,
+          spanDocumentId,
+        });
       }
-      await ctx.db.insert("spans", {
+      const spanDocumentId = await ctx.db.insert("spans", {
         traceId: "current-trace",
         spanId: "current-span",
         name: "current",
         attributes: [],
         resourceAttributes: [],
         receivedAt: 10_000,
+      });
+      await ctx.db.insert("spanKeys", {
+        traceId: "current-trace",
+        spanId: "current-span",
+        spanDocumentId,
       });
     });
 
@@ -240,5 +326,8 @@ describe("OpenRouter observability component", () => {
     });
     await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
     expect((await storedSpans(backend)).map((span) => span.spanId)).toEqual(["current-span"]);
+    expect(await backend.run(async (ctx) => await ctx.db.query("spanKeys").collect())).toHaveLength(
+      1,
+    );
   });
 });

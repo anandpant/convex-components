@@ -87,6 +87,7 @@ The client exposes `getTrace`, `getSpan`, `listBySession`, `listByUser`, `listBy
 - Only JSON bodies up to 900 KiB are accepted.
 - Empty authenticated OpenRouter Test Connection envelopes return `204` without writes.
 - OTLP resource spans, scope spans, spans, attributes, events, and links have explicit count limits.
+- Expanded stored spans are size-checked before admission so shared resource metadata cannot exceed Convex document or transaction limits through fan-out.
 - A delivery writes all new spans in one mutation. Invalid input writes nothing.
 - `(traceId, spanId)` identifies duplicates. New deliveries return `202`; duplicate-only deliveries return `204`.
 - Known correlation, model, token, and cost values get typed columns. Unknown span and resource attributes retain their order and original OTLP typed values as JSON.

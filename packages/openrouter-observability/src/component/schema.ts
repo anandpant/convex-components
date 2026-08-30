@@ -1,0 +1,16 @@
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+import { parsedSpanFields } from "./spanValues.js";
+
+export default defineSchema({
+  spans: defineTable({
+    ...parsedSpanFields,
+    receivedAt: v.number(),
+  })
+    .index("by_trace_span", ["traceId", "spanId"])
+    .index("by_session", ["sessionId", "receivedAt"])
+    .index("by_user", ["userId", "receivedAt"])
+    .index("by_request", ["requestId", "receivedAt"])
+    .index("by_entity", ["entityType", "entityId", "receivedAt"])
+    .index("by_received", ["receivedAt"]),
+});

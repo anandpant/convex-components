@@ -1,0 +1,727 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "openrouter"
+            }
+          },
+          {
+            "key": "openrouter.trace.id",
+            "value": {
+              "stringValue": "gen-1787971242-ZNNkqbzHERdScNd64gYK"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "openrouter"
+          },
+          "spans": [
+            {
+              "traceId": "a44772891b0e7515d61a9dcd6b698303",
+              "spanId": "a44772891b0e7515",
+              "name": "fixture-smoke",
+              "kind": 3,
+              "startTimeUnixNano": "1787971242450000000",
+              "endTimeUnixNano": "1787971243113000000",
+              "status": {
+                "code": 1
+              },
+              "attributes": [
+                {
+                  "key": "trace.name",
+                  "value": {
+                    "stringValue": "Fixture Capture Smoke"
+                  }
+                },
+                {
+                  "key": "user.id",
+                  "value": {
+                    "stringValue": "fixture-capture-smoke"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "fixture-capture-session-001"
+                  }
+                },
+                {
+                  "key": "trace.metadata.environment",
+                  "value": {
+                    "stringValue": "dev"
+                  }
+                },
+                {
+                  "key": "trace.metadata.request_id",
+                  "value": {
+                    "stringValue": "fixture-req-001"
+                  }
+                },
+                {
+                  "key": "trace.metadata.feature",
+                  "value": {
+                    "stringValue": "observability_incubation"
+                  }
+                },
+                {
+                  "key": "trace.metadata.provider_responses",
+                  "value": {
+                    "stringValue": "[{\"id\":\"resp_07ac56e5b739a83e016a9246aa9c1c87d1a0f453429dc05918\",\"provider_name\":\"OpenAI\",\"status\":200,\"latency\":307,\"is_byok\":false,\"endpoint_id\":\"0c835f2e-c18d-4e8c-b245-e1e3bd08b97f\",\"model_permaslug\":\"openai/gpt-5.4-nano-20260317\"}]"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.request_id",
+                  "value": {
+                    "stringValue": "req-1787971242-BsRhVQHSkfuMwgV1tvAv"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.tokens_prompt",
+                  "value": {
+                    "intValue": 9
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.tokens_completion",
+                  "value": {
+                    "intValue": 2
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.streamed",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.cancelled",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.api_type",
+                  "value": {
+                    "stringValue": "completions"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.app_id",
+                  "value": {
+                    "intValue": 3183712
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.origin",
+                  "value": {
+                    "stringValue": "https://studio.prismantix.com/"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.workspace_id",
+                  "value": {
+                    "stringValue": "workspace_TEST000000000000000000000"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.data_region",
+                  "value": {
+                    "stringValue": "global"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.external_user",
+                  "value": {
+                    "stringValue": "fixture-capture-smoke"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.num_media_completion",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.service_tier",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.user_agent",
+                  "value": {
+                    "stringValue": "curl/8.19.0"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.app.title",
+                  "value": {
+                    "stringValue": "Prismantix Studio"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.app.categories",
+                  "value": {
+                    "stringValue": "[]"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.app.origin_url",
+                  "value": {
+                    "stringValue": "https://studio.prismantix.com/"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.api_key.id",
+                  "value": {
+                    "intValue": 12345678
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.api_key_id",
+                  "value": {
+                    "intValue": 12345678
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.api_key.label",
+                  "value": {
+                    "stringValue": "sk-or-v1-TEST"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.api_key.creator_user_id",
+                  "value": {
+                    "stringValue": "user_TEST00000000000000000000000"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter_generation.model",
+                  "value": {
+                    "stringValue": "openai/gpt-5.4-nano-20260317"
+                  }
+                },
+                {
+                  "key": "trace.input",
+                  "value": {
+                    "stringValue": "{\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: fixture\"}]}"
+                  }
+                },
+                {
+                  "key": "trace.output",
+                  "value": {
+                    "stringValue": "{\"completion\":\"fixture\",\"reasoning\":null,\"rawRequest\":{\"model\":\"openai/gpt-5.4-nano\",\"max_tokens\":10,\"user\":\"fixture-capture-smoke\",\"session_id\":\"fixture-capture-session-001\",\"trace\":{\"trace_name\":\"Fixture Capture Smoke\",\"generation_name\":\"fixture-smoke\",\"environment\":\"dev\",\"request_id\":\"fixture-req-001\",\"feature\":\"observability_incubation\"},\"usage\":{\"include\":true},\"_skin\":\"chat-completions\"}}"
+                  }
+                },
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "generation"
+                  }
+                },
+                {
+                  "key": "span.level",
+                  "value": {
+                    "stringValue": "DEFAULT"
+                  }
+                },
+                {
+                  "key": "span.metadata.environment",
+                  "value": {
+                    "stringValue": "dev"
+                  }
+                },
+                {
+                  "key": "span.metadata.request_id",
+                  "value": {
+                    "stringValue": "fixture-req-001"
+                  }
+                },
+                {
+                  "key": "span.metadata.feature",
+                  "value": {
+                    "stringValue": "observability_incubation"
+                  }
+                },
+                {
+                  "key": "span.metadata.provider_responses",
+                  "value": {
+                    "stringValue": "[{\"id\":\"resp_07ac56e5b739a83e016a9246aa9c1c87d1a0f453429dc05918\",\"provider_name\":\"OpenAI\",\"status\":200,\"latency\":307,\"is_byok\":false,\"endpoint_id\":\"0c835f2e-c18d-4e8c-b245-e1e3bd08b97f\",\"model_permaslug\":\"openai/gpt-5.4-nano-20260317\"}]"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.request_id",
+                  "value": {
+                    "stringValue": "req-1787971242-BsRhVQHSkfuMwgV1tvAv"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.tokens_prompt",
+                  "value": {
+                    "intValue": 9
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.tokens_completion",
+                  "value": {
+                    "intValue": 2
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.streamed",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.cancelled",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.api_type",
+                  "value": {
+                    "stringValue": "completions"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.app_id",
+                  "value": {
+                    "intValue": 3183712
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.origin",
+                  "value": {
+                    "stringValue": "https://studio.prismantix.com/"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.workspace_id",
+                  "value": {
+                    "stringValue": "workspace_TEST000000000000000000000"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.data_region",
+                  "value": {
+                    "stringValue": "global"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.external_user",
+                  "value": {
+                    "stringValue": "fixture-capture-smoke"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.num_media_completion",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.service_tier",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.user_agent",
+                  "value": {
+                    "stringValue": "curl/8.19.0"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.app.title",
+                  "value": {
+                    "stringValue": "Prismantix Studio"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.app.categories",
+                  "value": {
+                    "stringValue": "[]"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.app.origin_url",
+                  "value": {
+                    "stringValue": "https://studio.prismantix.com/"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.api_key.id",
+                  "value": {
+                    "intValue": 12345678
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.api_key_id",
+                  "value": {
+                    "intValue": 12345678
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.api_key.label",
+                  "value": {
+                    "stringValue": "sk-or-v1-TEST"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.api_key.creator_user_id",
+                  "value": {
+                    "stringValue": "user_TEST00000000000000000000000"
+                  }
+                },
+                {
+                  "key": "span.metadata.openrouter_generation.model",
+                  "value": {
+                    "stringValue": "openai/gpt-5.4-nano-20260317"
+                  }
+                },
+                {
+                  "key": "span.input",
+                  "value": {
+                    "stringValue": "{\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: fixture\"}]}"
+                  }
+                },
+                {
+                  "key": "span.output",
+                  "value": {
+                    "stringValue": "{\"completion\":\"fixture\",\"reasoning\":null,\"rawRequest\":{\"model\":\"openai/gpt-5.4-nano\",\"max_tokens\":10,\"user\":\"fixture-capture-smoke\",\"session_id\":\"fixture-capture-session-001\",\"trace\":{\"trace_name\":\"Fixture Capture Smoke\",\"generation_name\":\"fixture-smoke\",\"environment\":\"dev\",\"request_id\":\"fixture-req-001\",\"feature\":\"observability_incubation\"},\"usage\":{\"include\":true},\"_skin\":\"chat-completions\"}}"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "openai/gpt-5.4-nano"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "openai/gpt-5.4-nano"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "gen-1787971242-ZNNkqbzHERdScNd64gYK"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": 13
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": 5
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.total_tokens",
+                  "value": {
+                    "intValue": 18
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_cost",
+                  "value": {
+                    "doubleValue": 0.0000026
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_cost",
+                  "value": {
+                    "doubleValue": 0.00000625
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.total_cost",
+                  "value": {
+                    "doubleValue": 0.00000885
+                  }
+                },
+                {
+                  "key": "gen_ai.prompt",
+                  "value": {
+                    "stringValue": "{\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: fixture\"}]}"
+                  }
+                },
+                {
+                  "key": "gen_ai.completion",
+                  "value": {
+                    "stringValue": "{\"completion\":\"fixture\",\"reasoning\":null,\"rawRequest\":{\"model\":\"openai/gpt-5.4-nano\",\"max_tokens\":10,\"user\":\"fixture-capture-smoke\",\"session_id\":\"fixture-capture-session-001\",\"trace\":{\"trace_name\":\"Fixture Capture Smoke\",\"generation_name\":\"fixture-smoke\",\"environment\":\"dev\",\"request_id\":\"fixture-req-001\",\"feature\":\"observability_incubation\"},\"usage\":{\"include\":true},\"_skin\":\"chat-completions\"}}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens.cached",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens.reasoning",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens.image",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"stop\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reason",
+                  "value": {
+                    "stringValue": "stop"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.source",
+                  "value": {
+                    "stringValue": "openrouter"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.api_key_name",
+                  "value": {
+                    "stringValue": "api-key_TEST"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.entity_id",
+                  "value": {
+                    "stringValue": "org_TEST000000000000000000000000"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.user_id",
+                  "value": {
+                    "stringValue": "fixture-capture-smoke"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.creator_user_id",
+                  "value": {
+                    "stringValue": "user_TEST00000000000000000000000"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.organization_id",
+                  "value": {
+                    "stringValue": "org_TEST000000000000000000000000"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.router_latency_ms",
+                  "value": {
+                    "doubleValue": 66
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.provider_request_ms",
+                  "value": {
+                    "doubleValue": 66
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.provider_headers_ms",
+                  "value": {
+                    "doubleValue": 373
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.first_token_ms",
+                  "value": {
+                    "doubleValue": 463
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.provider_body_end_ms",
+                  "value": {
+                    "doubleValue": 581
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.provider_time_to_first_token_ms",
+                  "value": {
+                    "doubleValue": 397
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.provider_name",
+                  "value": {
+                    "stringValue": "OpenAI"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.provider_slug",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.finish_reason",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.input_unit_price",
+                  "value": {
+                    "doubleValue": 2e-7
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.output_unit_price",
+                  "value": {
+                    "doubleValue": 0.00000125
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "openrouter"
+            }
+          },
+          {
+            "key": "openrouter.trace.id",
+            "value": {
+              "stringValue": "gen-1787971242-ZNNkqbzHERdScNd64gYK"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "openrouter"
+          },
+          "spans": [
+            {
+              "traceId": "a44772891b0e7515d61a9dcd6b698303",
+              "spanId": "f05c4a4a69f5a8f2",
+              "parentSpanId": "a44772891b0e7515",
+              "name": "provider attempt 1: OpenAI",
+              "kind": 2,
+              "startTimeUnixNano": "1787971242450000000",
+              "endTimeUnixNano": "1787971242757000000",
+              "status": {
+                "code": 1
+              },
+              "attributes": [
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "span"
+                  }
+                },
+                {
+                  "key": "span.level",
+                  "value": {
+                    "stringValue": "DEFAULT"
+                  }
+                },
+                {
+                  "key": "span.metadata.attempt_index",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "span.metadata.status_code",
+                  "value": {
+                    "intValue": 200
+                  }
+                },
+                {
+                  "key": "span.metadata.is_byok",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "span.metadata.endpoint_id",
+                  "value": {
+                    "stringValue": "0c835f2e-c18d-4e8c-b245-e1e3bd08b97f"
+                  }
+                },
+                {
+                  "key": "span.metadata.model_permaslug",
+                  "value": {
+                    "stringValue": "openai/gpt-5.4-nano-20260317"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "gen-1787971242-ZNNkqbzHERdScNd64gYK:attempt-0"
+                  }
+                },
+                {
+                  "key": "trace.metadata.openrouter.provider_name",
+                  "value": {
+                    "stringValue": "OpenAI"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

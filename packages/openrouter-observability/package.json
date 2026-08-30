@@ -1,0 +1,66 @@
+{
+  "name": "@anandpant/convex-openrouter-observability",
+  "description": "A Convex component for authenticated OpenRouter Broadcast OTLP trace ingestion.",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "repository": "github:anandpant/convex-components",
+  "homepage": "https://github.com/anandpant/convex-components#readme",
+  "bugs": {
+    "url": "https://github.com/anandpant/convex-components/issues"
+  },
+  "keywords": [
+    "convex",
+    "component",
+    "openrouter",
+    "observability",
+    "otlp"
+  ],
+  "type": "module",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./test": "./src/test.ts",
+    "./_generated/component.js": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./_generated/component": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./convex.config.js": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    },
+    "./convex.config": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    }
+  },
+  "types": "./dist/client.d.ts",
+  "module": "./dist/client.js",
+  "scripts": {
+    "build": "tsc6 --project tsconfig.build.json",
+    "build:clean": "rm -rf dist *.tsbuildinfo && pnpm build",
+    "codegen": "convex codegen --component-dir ./src/component",
+    "pack:check": "pnpm build:clean && pnpm pack --pack-destination .pack && node scripts/check-pack.mjs",
+    "prepare": "pnpm build",
+    "test": "vitest run --typecheck",
+    "typecheck": "tsc6 --noEmit && tsc6 --noEmit --project tsconfig.test.json && tsc6 --noEmit --project example/tsconfig.json"
+  },
+  "peerDependencies": {
+    "convex": "^1.45.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "convex": "^1.45.0",
+    "convex-test": "^0.0.56",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}

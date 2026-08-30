@@ -19,7 +19,7 @@ import { defineApp } from "convex/server";
 import { v } from "convex/values";
 
 const app = defineApp({
-  env: { OPENROUTER_OBSERVABILITY_TOKEN: v.string() },
+  env: { OPENROUTER_OBSERVABILITY_TOKEN: v.optional(v.string()) },
 });
 
 app.use(openrouterObservability, {
@@ -33,6 +33,9 @@ app.use(openrouterObservability, {
 
 export default app;
 ```
+
+The optional binding lets preview deployments install before their secret is provisioned. The
+ingestion routes fail closed with `401` until the token is set.
 
 Configure an OpenRouter Broadcast webhook at:
 
@@ -55,6 +58,11 @@ The mounted routes are:
 | `GET`  | `/health` | Return `ok`       |
 
 `RETENTION_DAYS` is optional and defaults to 30. It accepts integer strings from 1 through 3650. A daily job deletes expired spans in indexed batches.
+
+The initial release also performs a bounded, idempotent migration for deployments upgrading from
+the former Prismantix-local component: it adds compact deduplication keys, fills the newly separated
+resource-attribute field, and removes the incubator's raw-delivery rows. Ingestion returns `503`
+while legacy span keys are being prepared so duplicate checks remain within Convex transaction limits.
 
 ## Query from the host app
 

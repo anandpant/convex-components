@@ -13,6 +13,7 @@ if (tarballs.length !== 1)
 const tarball = join(packDirectory, tarballs[0]);
 const entries = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
 for (const required of [
+  "package/LICENSE",
   "package/dist/client.js",
   "package/dist/client.d.ts",
   "package/dist/component/convex.config.js",
@@ -21,6 +22,12 @@ for (const required of [
   "package/src/component/schema.ts",
 ]) {
   if (!entries.includes(required)) throw new Error(`Packed artifact is missing ${required}`);
+}
+const license = execFileSync("tar", ["-xOzf", tarball, "package/LICENSE"], {
+  encoding: "utf8",
+});
+if (!license.includes("Copyright 2026 Anand Pant")) {
+  throw new Error("Packed artifact is missing the package copyright notice");
 }
 if (entries.includes(".test."))
   throw new Error("Packed artifact contains test implementation files");
@@ -34,10 +41,10 @@ try {
       type: "module",
       dependencies: {
         "@anandpant/convex-openrouter-observability": `file:${tarball}`,
-        convex: "^1.45.0",
+        convex: "1.42.2",
       },
       devDependencies: {
-        "convex-test": "^0.0.56",
+        "convex-test": "0.0.54",
         typescript: "npm:@typescript/typescript6@^6.0.2",
         vite: "^8.2.2",
         vitest: "^4.1.11",
@@ -66,9 +73,10 @@ try {
     `import { expect, test } from "vitest";
 import helper from "@anandpant/convex-openrouter-observability/test";
 
-test("loads executable component source modules", () => {
+test("loads executable component source modules", async () => {
   expect(Object.keys(helper.modules)).toContain("./component/queries.ts");
   expect(Object.keys(helper.modules).some((path) => path.endsWith(".d.ts"))).toBe(false);
+  await expect(helper.modules["./component/crons.ts"]()).resolves.toBeDefined();
 });
 `,
   );

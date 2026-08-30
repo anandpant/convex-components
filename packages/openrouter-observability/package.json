@@ -2,6 +2,7 @@
   "name": "@anandpant/convex-openrouter-observability",
   "description": "A Convex component for authenticated OpenRouter Broadcast OTLP trace ingestion.",
   "version": "0.1.0",
+  "author": "Anand Pant",
   "license": "Apache-2.0",
   "repository": "github:anandpant/convex-components",
   "homepage": "https://github.com/anandpant/convex-components#readme",
@@ -44,6 +45,14 @@
   },
   "types": "./dist/client.d.ts",
   "module": "./dist/client.js",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "sideEffects": false,
   "scripts": {
     "build": "tsc6 --project tsconfig.build.json",
     "build:clean": "rm -rf dist *.tsbuildinfo && pnpm build",
@@ -54,7 +63,7 @@
     "typecheck": "tsc6 --noEmit && tsc6 --noEmit --project tsconfig.test.json && tsc6 --noEmit --project example/tsconfig.json"
   },
   "peerDependencies": {
-    "convex": "^1.45.0"
+    "convex": "^1.42.2"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",

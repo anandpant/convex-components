@@ -68,6 +68,14 @@ describe("OpenRouter observability component", () => {
     expect(await storedSpans(backend)).toHaveLength(0);
   });
 
+  it("fails closed when the webhook token is not configured", async () => {
+    delete process.env.WEBHOOK_TOKEN;
+    const backend = createBackend();
+    const response = await post(backend, loadFixture());
+    expect(response.status).toBe(401);
+    expect(await storedSpans(backend)).toHaveLength(0);
+  });
+
   it("rejects malformed JSON and malformed OTLP without writes", async () => {
     const backend = createBackend();
     expect((await post(backend, "{not-json")).status).toBe(400);
@@ -139,6 +147,11 @@ describe("OpenRouter observability component", () => {
     };
     const parsed = parseOpenRouterOtlpDelivery(expandedDelivery);
     await backend.run(async (ctx) => {
+      await ctx.db.insert("migrationState", {
+        name: "prismantix-spans-v1",
+        startedAt: Date.now(),
+        completedAt: Date.now(),
+      });
       for (const span of parsed) {
         const spanDocumentId = await ctx.db.insert("spans", { ...span, receivedAt: 0 });
         await ctx.db.insert("spanKeys", {
@@ -329,5 +342,91 @@ describe("OpenRouter observability component", () => {
     expect(await backend.run(async (ctx) => await ctx.db.query("spanKeys").collect())).toHaveLength(
       1,
     );
+  });
+
+  it("migrates legacy spans and removes legacy raw deliveries in bounded batches", async () => {
+    vi.useFakeTimers();
+    const backend = createBackend();
+    await backend.run(async (ctx) => {
+      const stale = Date.now() - 6 * 60 * 1000;
+      await ctx.db.insert("migrationState", {
+        name: "prismantix-spans-v1",
+        startedAt: stale,
+        lastScheduledAt: stale,
+      });
+      for (let index = 0; index < 3; index += 1) {
+        await ctx.db.insert("spans", {
+          traceId: `legacy-trace-${index}`,
+          spanId: `legacy-span-${index}`,
+          name: "legacy",
+          attributes: [],
+          receivedAt: index,
+        });
+        await ctx.db.insert("deliveries", {
+          byteLength: 2,
+          rawBody: "{}",
+          receivedAt: index,
+        });
+      }
+    });
+
+    const duplicateResponse = await post(
+      backend,
+      JSON.stringify(
+        envelope({ traceId: "legacy-trace-0", spanId: "legacy-span-0", name: "legacy" }),
+      ),
+    );
+    expect(duplicateResponse.status).toBe(503);
+    expect(await storedSpans(backend)).toHaveLength(3);
+
+    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
+    expect(
+      await post(
+        backend,
+        JSON.stringify(
+          envelope({ traceId: "legacy-trace-0", spanId: "legacy-span-0", name: "legacy" }),
+        ),
+      ),
+    ).toHaveProperty("status", 204);
+    expect(await backend.mutation(internal.retention.deleteLegacyDeliveries, {})).toEqual({
+      deletedDeliveries: 2,
+    });
+    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
+
+    expect(await storedSpans(backend)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ resourceAttributes: [] }),
+        expect.objectContaining({ resourceAttributes: [] }),
+        expect.objectContaining({ resourceAttributes: [] }),
+      ]),
+    );
+    expect(await backend.run(async (ctx) => await ctx.db.query("spanKeys").collect())).toHaveLength(
+      3,
+    );
+    expect(
+      await backend.run(async (ctx) => await ctx.db.query("deliveries").collect()),
+    ).toHaveLength(0);
+    expect(
+      await backend.run(async (ctx) =>
+        (await ctx.db.query("migrationState").collect()).map(({ name }) => name).sort(),
+      ),
+    ).toEqual(["prismantix-deliveries-v1", "prismantix-spans-v1"]);
+
+    await backend.run(async (ctx) => {
+      await ctx.db.insert("spans", {
+        traceId: "post-migration-trace",
+        spanId: "post-migration-span",
+        name: "post-migration",
+        attributes: [],
+        receivedAt: Date.now(),
+      });
+    });
+    await backend.mutation(internal.retention.start, {});
+    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
+    const postMigrationSpans = await storedSpans(backend);
+    expect(postMigrationSpans).toEqual([
+      expect.objectContaining({ spanId: "post-migration-span" }),
+    ]);
+    expect(postMigrationSpans[0]).not.toHaveProperty("resourceAttributes");
   });
 });

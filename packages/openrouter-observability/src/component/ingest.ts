@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { internal } from "./_generated/api.js";
 import { internalMutation, type MutationCtx } from "./_generated/server.js";
 import {
   InvalidOtlpDeliveryError,
@@ -9,6 +10,8 @@ import {
 } from "./parser.js";
 
 const MAX_DELIVERY_WRITE_BYTES = 8 * 1024 * 1024;
+const SPAN_MIGRATION = "prismantix-spans-v1";
+const MIGRATION_RETRY_DELAY_MS = 5 * 60 * 1000;
 
 function isEmptyOtlpEnvelope(value: unknown) {
   const record = value as Record<string, unknown> | null;
@@ -47,14 +50,53 @@ function parseDelivery(rawBody: string) {
   }
 }
 
-async function spanExists(ctx: MutationCtx, span: ParsedOpenRouterSpan) {
-  const existing = await ctx.db
-    .query("spanKeys")
-    .withIndex("by_trace_span", (query) =>
-      query.eq("traceId", span.traceId).eq("spanId", span.spanId),
-    )
-    .first();
-  return existing !== null;
+async function spanKeyExists(ctx: MutationCtx, span: ParsedOpenRouterSpan) {
+  return (
+    (await ctx.db
+      .query("spanKeys")
+      .withIndex("by_trace_span", (query) =>
+        query.eq("traceId", span.traceId).eq("spanId", span.spanId),
+      )
+      .first()) !== null
+  );
+}
+
+async function spanMigrationIsReady(ctx: MutationCtx) {
+  const state = await ctx.db
+    .query("migrationState")
+    .withIndex("by_name", (query) => query.eq("name", SPAN_MIGRATION))
+    .unique();
+  if (state?.completedAt !== undefined) return true;
+  const now = Date.now();
+  if (state !== null) {
+    const lastScheduledAt = state.lastScheduledAt ?? state.startedAt ?? 0;
+    if (now - lastScheduledAt >= MIGRATION_RETRY_DELAY_MS) {
+      await ctx.db.patch("migrationState", state._id, {
+        startedAt: state.startedAt ?? now,
+        lastScheduledAt: now,
+      });
+      await ctx.scheduler.runAfter(0, internal.retention.migrateLegacyData, {});
+    }
+    return false;
+  }
+
+  const existingSpans = await ctx.db.query("spans").take(1);
+  if (existingSpans.length === 0) {
+    await ctx.db.insert("migrationState", {
+      name: SPAN_MIGRATION,
+      startedAt: now,
+      completedAt: now,
+    });
+    return true;
+  }
+
+  await ctx.db.insert("migrationState", {
+    name: SPAN_MIGRATION,
+    startedAt: now,
+    lastScheduledAt: now,
+  });
+  await ctx.scheduler.runAfter(0, internal.retention.migrateLegacyData, {});
+  return false;
 }
 
 function assertDeliveryWriteBound(spans: ParsedOpenRouterSpan[]) {
@@ -77,12 +119,15 @@ export const admit = internalMutation({
     if (args.isTestConnection && isEmptyOtlpEnvelope(parsed.delivery)) {
       return { kind: "test_connection" } as const;
     }
+    if (!(await spanMigrationIsReady(ctx))) {
+      return { kind: "unavailable" } as const;
+    }
 
     const newSpans: ParsedOpenRouterSpan[] = [];
     const deliveryKeys = new Set<string>();
     for (const span of parsed.spans) {
       const key = JSON.stringify([span.traceId, span.spanId]);
-      if (deliveryKeys.has(key) || (await spanExists(ctx, span))) continue;
+      if (deliveryKeys.has(key) || (await spanKeyExists(ctx, span))) continue;
       deliveryKeys.add(key);
       newSpans.push(span);
     }

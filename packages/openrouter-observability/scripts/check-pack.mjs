@@ -23,6 +23,12 @@ for (const required of [
 ]) {
   if (!entries.includes(required)) throw new Error(`Packed artifact is missing ${required}`);
 }
+const license = execFileSync("tar", ["-xOzf", tarball, "package/LICENSE"], {
+  encoding: "utf8",
+});
+if (!license.includes("Copyright 2026 Anand Pant")) {
+  throw new Error("Packed artifact is missing the package copyright notice");
+}
 if (entries.includes(".test."))
   throw new Error("Packed artifact contains test implementation files");
 

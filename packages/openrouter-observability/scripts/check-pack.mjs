@@ -67,9 +67,10 @@ try {
     `import { expect, test } from "vitest";
 import helper from "@anandpant/convex-openrouter-observability/test";
 
-test("loads executable component source modules", () => {
+test("loads executable component source modules", async () => {
   expect(Object.keys(helper.modules)).toContain("./component/queries.ts");
   expect(Object.keys(helper.modules).some((path) => path.endsWith(".d.ts"))).toBe(false);
+  await expect(helper.modules["./component/crons.ts"]()).resolves.toBeDefined();
 });
 `,
   );

@@ -5,7 +5,7 @@ const crons = cronJobs();
 
 crons.daily(
   "delete expired OpenRouter observability data",
-  { hourUTC: 4 },
+  { hourUTC: 4, minuteUTC: 7 },
   internal.retention.start,
 );
 

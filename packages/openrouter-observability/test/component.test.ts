@@ -68,6 +68,14 @@ describe("OpenRouter observability component", () => {
     expect(await storedSpans(backend)).toHaveLength(0);
   });
 
+  it("fails closed when the webhook token is not configured", async () => {
+    delete process.env.WEBHOOK_TOKEN;
+    const backend = createBackend();
+    const response = await post(backend, loadFixture());
+    expect(response.status).toBe(401);
+    expect(await storedSpans(backend)).toHaveLength(0);
+  });
+
   it("rejects malformed JSON and malformed OTLP without writes", async () => {
     const backend = createBackend();
     expect((await post(backend, "{not-json")).status).toBe(400);

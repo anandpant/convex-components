@@ -3,7 +3,7 @@ import { defineApp } from "convex/server";
 import { v } from "convex/values";
 
 const app = defineApp({
-  env: { OPENROUTER_OBSERVABILITY_TOKEN: v.string() },
+  env: { OPENROUTER_OBSERVABILITY_TOKEN: v.optional(v.string()) },
 });
 
 app.use(openrouterObservability, {

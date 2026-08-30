@@ -28,7 +28,7 @@ function suppliedBearerToken(request: Request) {
 
 async function hasValidBearerToken(request: Request) {
   const suppliedToken = suppliedBearerToken(request);
-  if (env.WEBHOOK_TOKEN.length === 0 || suppliedToken.length === 0) return false;
+  if (!env.WEBHOOK_TOKEN || suppliedToken.length === 0) return false;
   return await constantTimeEqual(suppliedToken, env.WEBHOOK_TOKEN);
 }
 

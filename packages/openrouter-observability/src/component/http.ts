@@ -45,10 +45,14 @@ function admissionResponse(
   admission:
     | { kind: "accepted"; admitted: number }
     | { kind: "test_connection" }
+    | { kind: "unavailable" }
     | { kind: "rejected"; status: number; message: string },
 ) {
   if (admission.kind === "rejected") {
     return new Response(admission.message, { status: admission.status });
+  }
+  if (admission.kind === "unavailable") {
+    return new Response("Admission unavailable", { status: 503 });
   }
   if (admission.kind === "test_connection" || admission.admitted === 0) {
     return new Response(null, { status: 204 });

@@ -57,7 +57,8 @@ export const parsedSpanFields = {
   input: v.optional(v.string()),
   output: v.optional(v.string()),
   attributes: v.array(storedAttribute),
-  resourceAttributes: v.array(storedAttribute),
+  // Optional only while legacy Prismantix rows are migrated in place.
+  resourceAttributes: v.optional(v.array(storedAttribute)),
   eventsJson: v.optional(v.string()),
   linksJson: v.optional(v.string()),
   statusJson: v.optional(v.string()),

@@ -1,0 +1,26 @@
+{
+  "name": "convex-components",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "build": "pnpm --filter @anandpant/convex-openrouter-observability build",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm pack:check",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "pack:check": "pnpm --filter @anandpant/convex-openrouter-observability pack:check",
+    "test": "pnpm --filter @anandpant/convex-openrouter-observability test",
+    "typecheck": "pnpm --filter @anandpant/convex-openrouter-observability typecheck"
+  },
+  "devDependencies": {
+    "@convex-dev/eslint-plugin": "^4.0.0",
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^26.4.0",
+    "eslint": "^9.39.5",
+    "globals": "^17.9.0",
+    "prettier": "^3.9.6",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.66.0"
+  }
+}

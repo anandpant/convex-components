@@ -1,0 +1,92 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const packDirectory = join(packageRoot, ".pack");
+const tarballs = readdirSync(packDirectory).filter((file) => file.endsWith(".tgz"));
+if (tarballs.length !== 1)
+  throw new Error(`Expected one packed artifact, found ${tarballs.length}`);
+
+const tarball = join(packDirectory, tarballs[0]);
+const entries = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
+for (const required of [
+  "package/dist/client.js",
+  "package/dist/client.d.ts",
+  "package/dist/component/convex.config.js",
+  "package/dist/component/_generated/component.d.ts",
+  "package/src/test.ts",
+  "package/src/component/schema.ts",
+]) {
+  if (!entries.includes(required)) throw new Error(`Packed artifact is missing ${required}`);
+}
+if (entries.includes(".test."))
+  throw new Error("Packed artifact contains test implementation files");
+
+const installDirectory = mkdtempSync(join(tmpdir(), "convex-openrouter-pack-"));
+try {
+  writeFileSync(
+    join(installDirectory, "package.json"),
+    JSON.stringify({
+      private: true,
+      type: "module",
+      dependencies: {
+        "@anandpant/convex-openrouter-observability": `file:${tarball}`,
+        convex: "^1.45.0",
+      },
+      devDependencies: {
+        "convex-test": "^0.0.56",
+        typescript: "npm:@typescript/typescript6@^6.0.2",
+        vite: "^8.2.2",
+        vitest: "^4.1.11",
+      },
+    }),
+  );
+  writeFileSync(
+    join(installDirectory, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        noEmit: true,
+        strict: true,
+        target: "ESNext",
+      },
+      include: ["usage.ts"],
+    }),
+  );
+  writeFileSync(
+    join(installDirectory, "usage.ts"),
+    `${readFileSync(join(packageRoot, "example/convex/convex.config.ts"), "utf8")}\nimport componentTest from "@anandpant/convex-openrouter-observability/test";\nvoid componentTest;\n`,
+  );
+  writeFileSync(
+    join(installDirectory, "helper.test.ts"),
+    `import { expect, test } from "vitest";
+import helper from "@anandpant/convex-openrouter-observability/test";
+
+test("loads executable component source modules", () => {
+  expect(Object.keys(helper.modules)).toContain("./component/queries.ts");
+  expect(Object.keys(helper.modules).some((path) => path.endsWith(".d.ts"))).toBe(false);
+});
+`,
+  );
+  execFileSync("pnpm", ["install", "--ignore-scripts", "--frozen-lockfile=false"], {
+    cwd: installDirectory,
+    stdio: "pipe",
+  });
+  execFileSync("pnpm", ["exec", "tsc6", "--noEmit"], {
+    cwd: installDirectory,
+    stdio: "pipe",
+  });
+  execFileSync("pnpm", ["exec", "vitest", "run"], {
+    cwd: installDirectory,
+    stdio: "pipe",
+  });
+} finally {
+  rmSync(installDirectory, { recursive: true, force: true });
+  rmSync(packDirectory, { recursive: true, force: true });
+}
+
+console.log("Packed artifact installs and typechecks without workspace source imports.");

@@ -6,5 +6,5 @@
     "rootDir": ".",
     "types": ["node", "vite/client", "vitest/globals"]
   },
-  "include": ["src/**/*", "test/**/*"]
+  "include": ["src/**/*", "test/**/*", "example/convex/**/*"]
 }

@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,13 +41,14 @@ if (entries.includes(".test."))
 
 const installDirectory = mkdtempSync(join(tmpdir(), "convex-openrouter-pack-"));
 try {
+  copyFileSync(tarball, join(installDirectory, "package.tgz"));
   writeFileSync(
     join(installDirectory, "package.json"),
     JSON.stringify({
       private: true,
       type: "module",
       dependencies: {
-        "@anandpant/convex-openrouter-observability": `file:${tarball}`,
+        "@anandpant/convex-openrouter-observability": "file:./package.tgz",
         convex: "1.42.2",
       },
       devDependencies: {
@@ -66,7 +74,16 @@ try {
   );
   writeFileSync(
     join(installDirectory, "usage.ts"),
-    `${readFileSync(join(packageRoot, "example/convex/convex.config.ts"), "utf8")}\nimport componentTest from "@anandpant/convex-openrouter-observability/test";\nvoid componentTest;\n`,
+    `${readFileSync(join(packageRoot, "example/convex/convex.config.ts"), "utf8")}
+import { OpenRouterObservability, type OpenRouterObservabilityComponent } from "@anandpant/convex-openrouter-observability";
+import componentTest from "@anandpant/convex-openrouter-observability/test";
+import type { GenericDataModel, GenericQueryCtx } from "convex/server";
+declare const component: OpenRouterObservabilityComponent;
+declare const ctx: Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
+const observability = new OpenRouterObservability(component);
+void observability.getTrace(ctx, { traceId: "trace", limit: 7, afterSpanId: "span" });
+void componentTest;
+`,
   );
   writeFileSync(
     join(installDirectory, "helper.test.ts"),

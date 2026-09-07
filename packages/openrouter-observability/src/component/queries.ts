@@ -5,6 +5,7 @@ import { query } from "./_generated/server.js";
 // 16 MiB. Eight rows leaves headroom for indexes, metadata, and host wrappers.
 const DEFAULT_LIMIT = 8;
 const MAXIMUM_LIMIT = 8;
+const MAXIMUM_TRACE_PAGE_SIZE = MAXIMUM_LIMIT - 1;
 
 type Cursor = {
   receivedAt: number;
@@ -45,12 +46,33 @@ async function readCursorPage<T>(
 }
 
 export const getTrace = query({
-  args: { traceId: v.string(), limit: v.optional(v.number()) },
-  handler: async (ctx, args) =>
-    await ctx.db
+  args: {
+    traceId: v.string(),
+    limit: v.optional(v.number()),
+    afterSpanId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const limit = boundedLimit(args.limit ?? MAXIMUM_TRACE_PAGE_SIZE);
+    if (limit > MAXIMUM_TRACE_PAGE_SIZE) {
+      throw new Error(
+        `trace page limit must be no greater than ${MAXIMUM_TRACE_PAGE_SIZE} to reserve one bounded lookahead read`,
+      );
+    }
+    const rows = await ctx.db
       .query("spans")
-      .withIndex("by_trace_span", (index) => index.eq("traceId", args.traceId))
-      .take(boundedLimit(args.limit)),
+      .withIndex("by_trace_span", (index) => {
+        const trace = index.eq("traceId", args.traceId);
+        return args.afterSpanId === undefined ? trace : trace.gt("spanId", args.afterSpanId);
+      })
+      .take(limit + 1);
+    const page = rows.slice(0, limit);
+    const done = rows.length <= limit;
+    return {
+      page,
+      cursor: done ? undefined : page.at(-1)?.spanId,
+      done,
+    };
+  },
 });
 
 export const getSpan = query({

@@ -1,7 +1,7 @@
 import {
   OpenRouterObservability,
   type OpenRouterObservabilityComponent,
-} from "@anandpant/convex-openrouter-observability";
+} from "@shpitdev/convex-openrouter-observability";
 import {
   componentsGeneric,
   internalQueryGeneric,

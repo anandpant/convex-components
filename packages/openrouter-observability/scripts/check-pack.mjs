@@ -48,7 +48,7 @@ try {
       private: true,
       type: "module",
       dependencies: {
-        "@anandpant/convex-openrouter-observability": "file:./package.tgz",
+        "@shpitdev/convex-openrouter-observability": "file:./package.tgz",
         convex: "1.42.2",
       },
       devDependencies: {
@@ -75,8 +75,8 @@ try {
   writeFileSync(
     join(installDirectory, "usage.ts"),
     `${readFileSync(join(packageRoot, "example/convex/convex.config.ts"), "utf8")}
-import { OpenRouterObservability, type OpenRouterObservabilityComponent } from "@anandpant/convex-openrouter-observability";
-import componentTest from "@anandpant/convex-openrouter-observability/test";
+import { OpenRouterObservability, type OpenRouterObservabilityComponent } from "@shpitdev/convex-openrouter-observability";
+import componentTest from "@shpitdev/convex-openrouter-observability/test";
 import type { GenericDataModel, GenericQueryCtx } from "convex/server";
 declare const component: OpenRouterObservabilityComponent;
 declare const ctx: Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
@@ -88,7 +88,7 @@ void componentTest;
   writeFileSync(
     join(installDirectory, "helper.test.ts"),
     `import { expect, test } from "vitest";
-import helper from "@anandpant/convex-openrouter-observability/test";
+import helper from "@shpitdev/convex-openrouter-observability/test";
 
 test("loads executable component source modules", async () => {
   expect(Object.keys(helper.modules)).toContain("./component/queries.ts");

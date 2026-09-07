@@ -1,5 +1,5 @@
 {
-  "name": "@anandpant/convex-openrouter-observability",
+  "name": "@shpitdev/convex-openrouter-observability",
   "description": "A Convex component for authenticated OpenRouter Broadcast OTLP trace ingestion.",
   "version": "0.1.0",
   "author": "Anand Pant",

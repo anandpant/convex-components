@@ -1,4 +1,4 @@
-import openrouterObservability from "@anandpant/convex-openrouter-observability/convex.config.js";
+import openrouterObservability from "@shpitdev/convex-openrouter-observability/convex.config.js";
 import { defineApp } from "convex/server";
 import { v } from "convex/values";
 

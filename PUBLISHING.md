@@ -1,23 +1,24 @@
 # Publishing
 
-`@anandpant/convex-openrouter-observability` is published from GitHub releases after the
-repository and package are public.
+`@shpitdev/convex-openrouter-observability` will be published as a public npm package. Later
+releases publish from GitHub releases through npm trusted publishing.
 
 ## First release
 
 The first publication reserves the npm package name. Complete it through an interactive npm login
 with two-factor authentication, then replace that manual path with trusted publishing.
 
-1. Make this repository public after reviewing its complete Git history for secrets and private
-   application data.
-2. Run `pnpm check` from the repository root.
-3. From `packages/openrouter-observability`, run `npm publish --access public`.
-4. In the npm package settings, configure the GitHub Actions trusted publisher:
+1. From the repository root, run `pnpm install --frozen-lockfile`.
+2. From the repository root, run `pnpm check`.
+3. Authenticate for the public scope with
+   `npm login --scope=@shpitdev --registry=https://registry.npmjs.org`.
+4. From `packages/openrouter-observability`, run `npm publish --access public`.
+5. In the npm package settings, configure the GitHub Actions trusted publisher:
    - Repository: `anandpant/convex-components`
    - Workflow: `publish.yml`
    - Environment: `npm`
    - Allowed action: `npm publish`
-5. Require two-factor authentication and disallow token-based publishing after the trusted
+6. Require two-factor authentication and disallow token-based publishing after the trusted
    publisher succeeds.
 
 ## Later releases

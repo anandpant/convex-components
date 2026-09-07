@@ -1,20 +1,20 @@
 # OpenRouter observability for Convex
 
-`@anandpant/convex-openrouter-observability` receives OpenRouter Broadcast OTLP JSON inside your existing Convex deployment. It stores typed spans in component-owned tables so your host Convex functions can query traces by user, session, request, or application entity.
+`@shpitdev/convex-openrouter-observability` receives OpenRouter Broadcast OTLP JSON inside your existing Convex deployment. It stores typed spans in component-owned tables so your host Convex functions can query traces by user, session, request, or application entity.
 
 The component is specific to OpenRouter Broadcast traces. It is not a general OTLP collector.
 
 ## Install
 
 ```sh
-pnpm add @anandpant/convex-openrouter-observability
+pnpm add @shpitdev/convex-openrouter-observability
 ```
 
 Register the component and pass the webhook token from the host deployment:
 
 ```ts
 // convex/convex.config.ts
-import openrouterObservability from "@anandpant/convex-openrouter-observability/convex.config.js";
+import openrouterObservability from "@shpitdev/convex-openrouter-observability/convex.config.js";
 import { defineApp } from "convex/server";
 import { v } from "convex/values";
 
@@ -71,7 +71,7 @@ Component functions cannot read host auth or host tables. Keep authorization and
 
 ```ts
 // convex/traces.ts
-import { OpenRouterObservability } from "@anandpant/convex-openrouter-observability";
+import { OpenRouterObservability } from "@shpitdev/convex-openrouter-observability";
 import { v } from "convex/values";
 import { components } from "./_generated/api.js";
 import { query } from "./_generated/server.js";
@@ -140,4 +140,4 @@ Prismantix still mounts its incubating local component. After this package is pu
 
 ## Test utilities
 
-`@anandpant/convex-openrouter-observability/test` exports `register`, `schema`, and `modules` for `convex-test` host integration suites.
+`@shpitdev/convex-openrouter-observability/test` exports `register`, `schema`, and `modules` for `convex-test` host integration suites.

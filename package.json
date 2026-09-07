@@ -4,15 +4,15 @@
   "type": "module",
   "packageManager": "pnpm@10.15.0",
   "scripts": {
-    "build": "pnpm --filter @anandpant/convex-openrouter-observability build",
+    "build": "pnpm --filter @shpitdev/convex-openrouter-observability build",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm release:test && pnpm pack:check",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "pack:check": "pnpm --filter @anandpant/convex-openrouter-observability pack:check",
+    "pack:check": "pnpm --filter @shpitdev/convex-openrouter-observability pack:check",
     "release:test": "node --test scripts/check-release-tag.test.mjs",
-    "test": "pnpm --filter @anandpant/convex-openrouter-observability test",
-    "typecheck": "pnpm --filter @anandpant/convex-openrouter-observability typecheck"
+    "test": "pnpm --filter @shpitdev/convex-openrouter-observability test",
+    "typecheck": "pnpm --filter @shpitdev/convex-openrouter-observability typecheck"
   },
   "devDependencies": {
     "@convex-dev/eslint-plugin": "^4.0.0",

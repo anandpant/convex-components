@@ -14,11 +14,12 @@ type ReadContext = QueryContext | MutationContext | ActionContext;
 export type OpenRouterObservabilityComponent = ComponentApi;
 export type SpanCursor = { receivedAt: number; _creationTime: number };
 export type ListOptions = { limit?: number; before?: SpanCursor };
+export type TracePageOptions = { limit?: number; afterSpanId?: string };
 
 export class OpenRouterObservability {
   constructor(private readonly component: ComponentApi) {}
 
-  getTrace(ctx: ReadContext, args: { traceId: string; limit?: number }) {
+  getTrace(ctx: ReadContext, args: TracePageOptions & { traceId: string }) {
     return ctx.runQuery(this.component.queries.getTrace, args);
   }
 

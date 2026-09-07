@@ -41,6 +41,42 @@ function isTestConnection(request: Request) {
   return request.headers.get("x-test-connection")?.trim().toLowerCase() === "true";
 }
 
+function declaredBodySize(request: Request) {
+  const value = request.headers.get("content-length");
+  if (value === null || !/^\d+$/.test(value)) return undefined;
+  const size = Number(value);
+  return Number.isSafeInteger(size) ? size : undefined;
+}
+
+export async function readBoundedBody(request: Request) {
+  if ((declaredBodySize(request) ?? 0) > MAX_BODY_BYTES) {
+    await request.body?.cancel("Payload too large");
+    return { kind: "too_large" } as const;
+  }
+
+  const reader = request.body?.getReader();
+  if (!reader) return { kind: "body", text: "" } as const;
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let byteLength = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      byteLength += value.byteLength;
+      if (byteLength > MAX_BODY_BYTES) {
+        await reader.cancel("Payload too large");
+        return { kind: "too_large" } as const;
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    return { kind: "body", text: chunks.join("") } as const;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function admissionResponse(
   admission:
     | { kind: "accepted"; admitted: number }
@@ -68,15 +104,15 @@ const captureTraces = httpAction(async (ctx, request) => {
     return new Response("Content-Type must be application/json", { status: 415 });
   }
 
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > MAX_BODY_BYTES) {
+  const body = await readBoundedBody(request);
+  if (body.kind === "too_large") {
     return new Response("Payload too large", { status: 413 });
   }
 
   try {
     const admission = await ctx.runMutation(internal.ingest.admit, {
       isTestConnection: isTestConnection(request),
-      rawBody: new TextDecoder().decode(bytes),
+      rawBody: body.text,
     });
     return admissionResponse(admission);
   } catch (error) {

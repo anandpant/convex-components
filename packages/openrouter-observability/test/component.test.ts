@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "../src/component/_generated/api.js";
 import { parseOpenRouterOtlpDelivery } from "../src/component/parser.js";
 import schema from "../src/component/schema.js";
+import { readBoundedBody } from "../src/component/http.js";
 
 const modules = import.meta.glob("../src/component/**/*.ts");
 const TOKEN = "test-openrouter-observability-token";
@@ -123,6 +124,69 @@ describe("OpenRouter observability component", () => {
     };
     expect((await post(backend, JSON.stringify(expandedResourceAttributes))).status).toBe(413);
     expect(await storedSpans(backend)).toHaveLength(0);
+  });
+
+  it("counts streamed bytes, cancels oversized bodies, and ignores a misleading short length", async () => {
+    const backend = createBackend();
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(300 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = await backend.fetch("/traces", {
+      method: "POST",
+      headers: { ...JSON_HEADERS, "content-length": "1" },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+
+    expect(response.status).toBe(413);
+    expect(pulls).toBeLessThanOrEqual(5);
+    expect(cancelled).toBe(true);
+    expect(await storedSpans(backend)).toHaveLength(0);
+  });
+
+  it("rejects an oversized declared length before reading or writing", async () => {
+    let pulled = false;
+    const request = new Request("https://example.test/traces", {
+      method: "POST",
+      headers: { "content-length": String(900 * 1024 + 1) },
+      body: new ReadableStream({
+        pull(controller) {
+          pulled = true;
+          controller.enqueue(new Uint8Array([123, 125]));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+
+    expect(await readBoundedBody(request)).toEqual({ kind: "too_large" });
+    expect(pulled).toBe(false);
+  });
+
+  it("decodes UTF-8 characters split across body chunks", async () => {
+    const utf8 = new TextEncoder().encode('{"message":"café"}');
+    const split = utf8.indexOf(0xc3) + 1;
+    const request = new Request("https://example.test/traces", {
+      method: "POST",
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(utf8.slice(0, split));
+          controller.enqueue(utf8.slice(split));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+
+    expect(await readBoundedBody(request)).toEqual({ kind: "body", text: '{"message":"café"}' });
   });
 
   it("accepts a duplicate-only expanded delivery without rewriting spans", async () => {
@@ -260,9 +324,12 @@ describe("OpenRouter observability component", () => {
       }
     });
 
-    expect(await backend.query(api.queries.getTrace, { traceId: "correlated-trace" })).toHaveLength(
-      3,
-    );
+    expect(
+      await backend.query(api.queries.getTrace, { traceId: "correlated-trace" }),
+    ).toMatchObject({
+      page: expect.arrayContaining([expect.objectContaining({ spanId: "span-0" })]),
+      done: true,
+    });
     expect(
       await backend.query(api.queries.getSpan, {
         traceId: "correlated-trace",
@@ -298,6 +365,51 @@ describe("OpenRouter observability component", () => {
     await expect(backend.query(api.queries.listRecent, { limit: 9 })).rejects.toThrow(
       "limit must be a positive integer no greater than 8",
     );
+  });
+
+  it.each([
+    ["empty", 0],
+    ["exact page", 7],
+    ["more than the former cap", 9],
+    ["maximum realistic trace", 64],
+  ])("exhausts an %s trace without ambiguity", async (_name, spanCount) => {
+    const backend = createBackend();
+    await backend.run(async (ctx) => {
+      for (let index = 0; index < spanCount; index += 1) {
+        await ctx.db.insert("spans", {
+          traceId: "paged-trace",
+          spanId: `span-${index.toString().padStart(3, "0")}`,
+          name: "paged",
+          attributes: [],
+          resourceAttributes: [],
+          receivedAt: 1,
+        });
+      }
+    });
+
+    const spanIds: string[] = [];
+    let afterSpanId: string | undefined;
+    let pages = 0;
+    while (true) {
+      const result = await backend.query(api.queries.getTrace, {
+        traceId: "paged-trace",
+        limit: 7,
+        afterSpanId,
+      });
+      pages += 1;
+      spanIds.push(...result.page.map((span) => span.spanId));
+      if (result.done) {
+        expect(result.cursor).toBeUndefined();
+        break;
+      }
+      expect(result.cursor).toBe(result.page.at(-1)?.spanId);
+      afterSpanId = result.cursor;
+    }
+
+    expect(spanIds).toEqual(
+      Array.from({ length: spanCount }, (_, index) => `span-${index.toString().padStart(3, "0")}`),
+    );
+    expect(pages).toBe(Math.max(1, Math.ceil(spanCount / 7)));
   });
 
   it("deletes expired rows across bounded retention batches", async () => {

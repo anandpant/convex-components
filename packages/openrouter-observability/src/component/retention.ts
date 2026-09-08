@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 import { env, internalMutation, type MutationCtx } from "./_generated/server.js";
+import { projectStoredCorrelationAttributes } from "./parser.js";
 
 const DEFAULT_RETENTION_DAYS = 30;
 const MAX_RETENTION_DAYS = 3650;
@@ -12,6 +13,7 @@ const DELETE_BATCH_SIZE = 8;
 const MIGRATION_BATCH_SIZE = 2;
 const SPAN_MIGRATION = "prismantix-spans-v1";
 const DELIVERY_MIGRATION = "prismantix-deliveries-v1";
+const CORRELATION_MIGRATION = "correlation-projections-v1";
 const MIGRATION_RETRY_DELAY_MS = 5 * 60 * 1000;
 
 function retentionDays() {
@@ -141,6 +143,71 @@ export const migrateLegacyData = internalMutation({
   },
 });
 
+export const backfillCorrelationProjections = internalMutation({
+  args: { after: v.optional(v.id("spans")) },
+  handler: async (ctx, args) => {
+    const state = await migrationState(ctx, CORRELATION_MIGRATION);
+    if (state?.completedAt !== undefined) return { processedSpans: 0 };
+    const after = args.after ?? state?.lastProcessedSpanId;
+    const spans = await readMigrationPage(ctx, after);
+    const page = spans.slice(0, MIGRATION_BATCH_SIZE);
+    for (const span of page) {
+      const projected = projectStoredCorrelationAttributes(span.attributes);
+      const attributesChanged = projected.attributes.length !== span.attributes.length;
+      if (attributesChanged || Object.keys(projected.projections).length > 0) {
+        await ctx.db.patch("spans", span._id, {
+          ...projected.projections,
+          attributes: projected.attributes,
+        });
+      }
+    }
+
+    const processedSpans = (state?.processedSpans ?? 0) + page.length;
+    const last = page.at(-1);
+    if (spans.length > MIGRATION_BATCH_SIZE) {
+      if (!last) throw new Error("Projection page must contain a span before continuing");
+      const now = Date.now();
+      if (state) {
+        await ctx.db.patch("migrationState", state._id, {
+          startedAt: state.startedAt ?? now,
+          lastScheduledAt: now,
+          processedSpans,
+          lastProcessedSpanId: last._id,
+        });
+      } else {
+        await ctx.db.insert("migrationState", {
+          name: CORRELATION_MIGRATION,
+          startedAt: now,
+          lastScheduledAt: now,
+          processedSpans,
+          lastProcessedSpanId: last._id,
+        });
+      }
+      await ctx.scheduler.runAfter(0, internal.retention.backfillCorrelationProjections, {
+        after: last._id,
+      });
+    } else {
+      const now = Date.now();
+      if (state) {
+        await ctx.db.patch("migrationState", state._id, {
+          completedAt: now,
+          processedSpans,
+          ...(last === undefined ? {} : { lastProcessedSpanId: last._id }),
+        });
+      } else {
+        await ctx.db.insert("migrationState", {
+          name: CORRELATION_MIGRATION,
+          startedAt: now,
+          completedAt: now,
+          processedSpans,
+          ...(last === undefined ? {} : { lastProcessedSpanId: last._id }),
+        });
+      }
+    }
+    return { processedSpans: page.length };
+  },
+});
+
 export const deleteLegacyDeliveries = internalMutation({
   args: {},
   handler: async (ctx) => {
@@ -168,6 +235,9 @@ export const start = internalMutation({
     );
     await ensureMigrationScheduled(ctx, DELIVERY_MIGRATION, async () =>
       ctx.scheduler.runAfter(0, internal.retention.deleteLegacyDeliveries, {}),
+    );
+    await ensureMigrationScheduled(ctx, CORRELATION_MIGRATION, async () =>
+      ctx.scheduler.runAfter(0, internal.retention.backfillCorrelationProjections, {}),
     );
     await ctx.scheduler.runAfter(0, internal.retention.deleteExpired, {
       cutoff: Date.now() - retentionMs,

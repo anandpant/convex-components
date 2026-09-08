@@ -29,6 +29,10 @@ export type ParsedOpenRouterSpan = {
   userId?: string;
   sessionId?: string;
   requestId?: string;
+  runId?: string;
+  jobId?: string;
+  rootExecutionId?: string;
+  opencodeSessionId?: string;
   environment?: string;
   feature?: string;
   traceName?: string;
@@ -278,6 +282,10 @@ const STRING_PROJECTIONS = {
   userId: "user.id",
   sessionId: "session.id",
   requestId: "trace.metadata.request_id",
+  runId: "trace.metadata.run_id",
+  jobId: "trace.metadata.job_id",
+  rootExecutionId: "trace.metadata.root_execution_id",
+  opencodeSessionId: "trace.metadata.opencode_session_id",
   environment: "trace.metadata.environment",
   feature: "trace.metadata.feature",
   traceName: "trace.name",
@@ -292,6 +300,13 @@ const STRING_PROJECTIONS = {
   apiKeyName: "trace.metadata.openrouter.api_key_name",
   creditPoolId: "trace.metadata.openrouter_generation.credit_pool_id",
   creditPoolExpiresAt: "trace.metadata.openrouter_generation.credit_pool_expires_at",
+} as const;
+
+const CORRELATION_PROJECTIONS = {
+  runId: STRING_PROJECTIONS.runId,
+  jobId: STRING_PROJECTIONS.jobId,
+  rootExecutionId: STRING_PROJECTIONS.rootExecutionId,
+  opencodeSessionId: STRING_PROJECTIONS.opencodeSessionId,
 } as const;
 
 const INTEGER_PROJECTIONS = {
@@ -447,6 +462,28 @@ export function parseOpenRouterOtlpDelivery(value: unknown) {
 
 export function storedOpenRouterSpanSize(span: ParsedOpenRouterSpan) {
   return getConvexSize({ ...span, receivedAt: 0 });
+}
+
+export function projectStoredCorrelationAttributes(attributes: ReadonlyArray<StoredAttribute>) {
+  const parsed = attributes.map((attribute) => {
+    let value: unknown;
+    try {
+      value = JSON.parse(attribute.valueJson) as unknown;
+    } catch {
+      return undefined;
+    }
+    return isRecord(value) ? { key: attribute.key, value } : undefined;
+  });
+  if (parsed.some((attribute) => attribute === undefined)) {
+    return { projections: {}, attributes: [...attributes] };
+  }
+  const typedAttributes = parsed as OtlpAttribute[];
+  const consumed = new Set<number>();
+  const projections = projectGroup(typedAttributes, consumed, CORRELATION_PROJECTIONS, typedString);
+  return {
+    projections,
+    attributes: attributes.filter((_attribute, index) => !consumed.has(index)),
+  };
 }
 
 export function assertSpanAttributeReconstruction(

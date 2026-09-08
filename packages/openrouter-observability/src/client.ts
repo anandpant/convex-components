@@ -3,8 +3,22 @@ import type {
   GenericDataModel,
   GenericMutationCtx,
   GenericQueryCtx,
+  FunctionArgs,
 } from "convex/server";
 import type { ComponentApi } from "./component/_generated/component.js";
+
+export {
+  decodeOpenRouterInput,
+  decodeOpenRouterOutput,
+  type ContentDecodeOutcome,
+  type DecodedInputContent,
+  type DecodedMessage,
+  type DecodedMessageContent,
+  type DecodedOutputContent,
+  type EmittedToolCall,
+  type TextContentPart,
+  type ToolDefinition,
+} from "./content.js";
 
 type QueryContext = Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
 type MutationContext = Pick<GenericMutationCtx<GenericDataModel>, "runQuery">;
@@ -13,37 +27,47 @@ type ReadContext = QueryContext | MutationContext | ActionContext;
 
 export type OpenRouterObservabilityComponent = ComponentApi;
 export type SpanCursor = { receivedAt: number; _creationTime: number };
-export type ListOptions = { limit?: number; before?: SpanCursor };
-export type TracePageOptions = { limit?: number; afterSpanId?: string };
+export type SummaryPageOptions = { limit?: number; cursor?: SpanCursor };
+export type TraceSummaryCursor = FunctionArgs<
+  ComponentApi["queries"]["pageTraceSummaries"]
+>["cursor"];
+export type SpanDocumentId = FunctionArgs<
+  ComponentApi["queries"]["exportFullSpan"]
+>["spanDocumentId"];
+export type TraceSummaryPageOptions = { limit?: number; cursor?: TraceSummaryCursor };
+export type SpanCorrelation =
+  | { kind: "request"; requestId: string }
+  | { kind: "session"; sessionId: string }
+  | { kind: "user"; userId: string }
+  | { kind: "entity"; entityType: string; entityId: string }
+  | { kind: "run"; runId: string }
+  | { kind: "job"; jobId: string }
+  | { kind: "rootExecution"; rootExecutionId: string }
+  | { kind: "opencodeSession"; opencodeSessionId: string };
 
 export class OpenRouterObservability {
   constructor(private readonly component: ComponentApi) {}
 
-  getTrace(ctx: ReadContext, args: TracePageOptions & { traceId: string }) {
-    return ctx.runQuery(this.component.queries.getTrace, args);
+  pageTraceSummaries(ctx: ReadContext, args: TraceSummaryPageOptions & { traceId: string }) {
+    return ctx.runQuery(this.component.queries.pageTraceSummaries, args);
   }
 
-  getSpan(ctx: ReadContext, args: { traceId: string; spanId: string }) {
-    return ctx.runQuery(this.component.queries.getSpan, args);
+  pageCorrelationSummaries(
+    ctx: ReadContext,
+    args: SummaryPageOptions & { correlation: SpanCorrelation },
+  ) {
+    return ctx.runQuery(this.component.queries.pageCorrelationSummaries, args);
   }
 
-  listBySession(ctx: ReadContext, args: ListOptions & { sessionId: string }) {
-    return ctx.runQuery(this.component.queries.listBySession, args);
+  pageRecentSummaries(ctx: ReadContext, args: SummaryPageOptions = {}) {
+    return ctx.runQuery(this.component.queries.pageRecentSummaries, args);
   }
 
-  listByUser(ctx: ReadContext, args: ListOptions & { userId: string }) {
-    return ctx.runQuery(this.component.queries.listByUser, args);
+  exportFullSpan(ctx: ReadContext, args: { spanDocumentId: SpanDocumentId }) {
+    return ctx.runQuery(this.component.queries.exportFullSpan, args);
   }
 
-  listByRequest(ctx: ReadContext, args: ListOptions & { requestId: string }) {
-    return ctx.runQuery(this.component.queries.listByRequest, args);
-  }
-
-  listByEntity(ctx: ReadContext, args: ListOptions & { entityType: string; entityId: string }) {
-    return ctx.runQuery(this.component.queries.listByEntity, args);
-  }
-
-  listRecent(ctx: ReadContext, args: ListOptions = {}) {
-    return ctx.runQuery(this.component.queries.listRecent, args);
+  getCorrelationProjectionCoverage(ctx: ReadContext) {
+    return ctx.runQuery(this.component.queries.getCorrelationProjectionCoverage, {});
   }
 }

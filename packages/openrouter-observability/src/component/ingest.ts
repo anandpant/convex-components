@@ -11,6 +11,7 @@ import {
 
 const MAX_DELIVERY_WRITE_BYTES = 8 * 1024 * 1024;
 const SPAN_MIGRATION = "prismantix-spans-v1";
+const CORRELATION_MIGRATION = "correlation-projections-v1";
 const MIGRATION_RETRY_DELAY_MS = 5 * 60 * 1000;
 
 function isEmptyOtlpEnvelope(value: unknown) {
@@ -99,6 +100,43 @@ async function spanMigrationIsReady(ctx: MutationCtx) {
   return false;
 }
 
+async function ensureCorrelationMigrationStarted(ctx: MutationCtx) {
+  const state = await ctx.db
+    .query("migrationState")
+    .withIndex("by_name", (query) => query.eq("name", CORRELATION_MIGRATION))
+    .unique();
+  if (state?.completedAt !== undefined) return;
+  const now = Date.now();
+  if (state) {
+    const lastScheduledAt = state.lastScheduledAt ?? state.startedAt ?? 0;
+    if (now - lastScheduledAt < MIGRATION_RETRY_DELAY_MS) return;
+    await ctx.db.patch("migrationState", state._id, {
+      startedAt: state.startedAt ?? now,
+      lastScheduledAt: now,
+    });
+    await ctx.scheduler.runAfter(0, internal.retention.backfillCorrelationProjections, {});
+    return;
+  }
+
+  if ((await ctx.db.query("spans").take(1)).length === 0) {
+    await ctx.db.insert("migrationState", {
+      name: CORRELATION_MIGRATION,
+      startedAt: now,
+      completedAt: now,
+      processedSpans: 0,
+    });
+    return;
+  }
+
+  await ctx.db.insert("migrationState", {
+    name: CORRELATION_MIGRATION,
+    startedAt: now,
+    lastScheduledAt: now,
+    processedSpans: 0,
+  });
+  await ctx.scheduler.runAfter(0, internal.retention.backfillCorrelationProjections, {});
+}
+
 function assertDeliveryWriteBound(spans: ParsedOpenRouterSpan[]) {
   const storedBytes = spans.reduce((total, span) => total + storedOpenRouterSpanSize(span), 0);
   if (storedBytes > MAX_DELIVERY_WRITE_BYTES) {
@@ -122,6 +160,7 @@ export const admit = internalMutation({
     if (!(await spanMigrationIsReady(ctx))) {
       return { kind: "unavailable" } as const;
     }
+    await ensureCorrelationMigrationStarted(ctx);
 
     const newSpans: ParsedOpenRouterSpan[] = [];
     const deliveryKeys = new Set<string>();

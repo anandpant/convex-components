@@ -2,12 +2,7 @@ import {
   OpenRouterObservability,
   type OpenRouterObservabilityComponent,
 } from "@shpitdev/convex-openrouter-observability";
-import {
-  componentsGeneric,
-  internalQueryGeneric,
-  queryGeneric,
-  type QueryBuilder,
-} from "convex/server";
+import { componentsGeneric, internalQueryGeneric, type QueryBuilder } from "convex/server";
 import { v } from "convex/values";
 import type schema from "./schema.js";
 import type { DataModelFromSchemaDefinition } from "convex/server";
@@ -18,23 +13,45 @@ const components = componentsGeneric() as unknown as {
 const observability = new OpenRouterObservability(components.openrouterObservability);
 
 type DataModel = DataModelFromSchemaDefinition<typeof schema>;
-const query: QueryBuilder<DataModel, "public"> = queryGeneric;
 const internalQuery: QueryBuilder<DataModel, "internal"> = internalQueryGeneric;
+const cursor = v.object({ receivedAt: v.number(), _creationTime: v.number() });
 
-export const byRequest = query({
-  args: { requestRecordId: v.id("traceRequests") },
-  handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Unauthorized");
-    const request = await ctx.db.get("traceRequests", args.requestRecordId);
-    if (!request || request.ownerSubject !== identity.subject) throw new Error("Forbidden");
-    return await observability.listByRequest(ctx, {
-      requestId: request.observabilityRequestId,
-    });
-  },
+export const requestSpanSummaries = internalQuery({
+  args: { requestId: v.string(), limit: v.optional(v.number()), cursor: v.optional(cursor) },
+  handler: async (ctx, args) =>
+    await observability.pageCorrelationSummaries(ctx, {
+      correlation: { kind: "request", requestId: args.requestId },
+      limit: args.limit,
+      cursor: args.cursor,
+    }),
 });
 
-export const recent = internalQuery({
-  args: { limit: v.optional(v.number()) },
-  handler: async (ctx, args) => await observability.listRecent(ctx, args),
+export const sessionSpanSummaries = internalQuery({
+  args: { sessionId: v.string(), limit: v.optional(v.number()), cursor: v.optional(cursor) },
+  handler: async (ctx, args) =>
+    await observability.pageCorrelationSummaries(ctx, {
+      correlation: { kind: "session", sessionId: args.sessionId },
+      limit: args.limit,
+      cursor: args.cursor,
+    }),
+});
+
+export const traceSpanSummaries = internalQuery({
+  args: { traceId: v.string(), limit: v.optional(v.number()), cursor: v.optional(v.string()) },
+  handler: async (ctx, args) =>
+    await observability.pageTraceSummaries(ctx, {
+      traceId: args.traceId,
+      limit: args.limit,
+      cursor: args.cursor as Parameters<typeof observability.pageTraceSummaries>[1]["cursor"],
+    }),
+});
+
+export const fullSpanExport = internalQuery({
+  args: { spanDocumentId: v.string() },
+  handler: async (ctx, args) =>
+    await observability.exportFullSpan(ctx, {
+      spanDocumentId: args.spanDocumentId as Parameters<
+        typeof observability.exportFullSpan
+      >[1]["spanDocumentId"],
+    }),
 });

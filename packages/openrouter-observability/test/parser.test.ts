@@ -366,6 +366,36 @@ describe("OpenRouter Broadcast OTLP parser", () => {
     assertSpanAttributeReconstruction(attributes, span);
   });
 
+  it("projects only the fixed indexed correlation keys", () => {
+    const attributes = [
+      ["trace.metadata.run_id", "run-1"],
+      ["trace.metadata.job_id", "job-1"],
+      ["trace.metadata.root_execution_id", "root-1"],
+      ["trace.metadata.opencode_session_id", "opencode-1"],
+      ["trace.metadata.correlation_id", "unindexed-1"],
+    ].map(([key, value]) => ({ key, value: { stringValue: value } }));
+    const [span] = parseOpenRouterOtlpDelivery({
+      resourceSpans: [
+        {
+          scopeSpans: [{ spans: [{ traceId: "trace", spanId: "span", name: "test", attributes }] }],
+        },
+      ],
+    });
+
+    expect(span).toMatchObject({
+      runId: "run-1",
+      jobId: "job-1",
+      rootExecutionId: "root-1",
+      opencodeSessionId: "opencode-1",
+      attributes: [
+        {
+          key: "trace.metadata.correlation_id",
+          valueJson: '{"stringValue":"unindexed-1"}',
+        },
+      ],
+    });
+  });
+
   it("keeps every content copy when byte identity is not proven", () => {
     const delivery = {
       resourceSpans: [

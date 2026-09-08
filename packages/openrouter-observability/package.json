@@ -1,7 +1,7 @@
 {
   "name": "@shpitdev/convex-openrouter-observability",
   "description": "A Convex component for authenticated OpenRouter Broadcast OTLP trace ingestion.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Anand Pant",
   "license": "Apache-2.0",
   "repository": "github:anandpant/convex-components",
@@ -18,6 +18,7 @@
   ],
   "type": "module",
   "files": [
+    "CHANGELOG.md",
     "dist",
     "src"
   ],

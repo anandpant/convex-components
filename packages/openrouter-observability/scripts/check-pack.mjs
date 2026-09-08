@@ -21,8 +21,10 @@ const tarball = join(packDirectory, tarballs[0]);
 const entries = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
 for (const required of [
   "package/LICENSE",
+  "package/CHANGELOG.md",
   "package/dist/client.js",
   "package/dist/client.d.ts",
+  "package/dist/content.js",
   "package/dist/component/convex.config.js",
   "package/dist/component/_generated/component.d.ts",
   "package/src/test.ts",
@@ -75,13 +77,15 @@ try {
   writeFileSync(
     join(installDirectory, "usage.ts"),
     `${readFileSync(join(packageRoot, "example/convex/convex.config.ts"), "utf8")}
-import { OpenRouterObservability, type OpenRouterObservabilityComponent } from "@shpitdev/convex-openrouter-observability";
+import { decodeOpenRouterInput, OpenRouterObservability, type OpenRouterObservabilityComponent } from "@shpitdev/convex-openrouter-observability";
 import componentTest from "@shpitdev/convex-openrouter-observability/test";
 import type { GenericDataModel, GenericQueryCtx } from "convex/server";
 declare const component: OpenRouterObservabilityComponent;
 declare const ctx: Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
 const observability = new OpenRouterObservability(component);
-void observability.getTrace(ctx, { traceId: "trace", limit: 7, afterSpanId: "span" });
+void observability.pageTraceSummaries(ctx, { traceId: "trace", limit: 6 });
+void observability.pageCorrelationSummaries(ctx, { correlation: { kind: "user", userId: "user" } });
+void decodeOpenRouterInput('{"messages":[]}');
 void componentTest;
 `,
   );

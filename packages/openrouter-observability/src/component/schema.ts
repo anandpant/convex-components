@@ -8,6 +8,8 @@ export default defineSchema({
     startedAt: v.optional(v.number()),
     lastScheduledAt: v.optional(v.number()),
     completedAt: v.optional(v.number()),
+    processedSpans: v.optional(v.number()),
+    lastProcessedSpanId: v.optional(v.id("spans")),
   }).index("by_name", ["name"]),
   // Temporary compatibility table for hosts migrating from the Prismantix
   // incubator. New deliveries are never written here; the bounded migration
@@ -33,5 +35,9 @@ export default defineSchema({
     .index("by_user", ["userId", "receivedAt"])
     .index("by_request", ["requestId", "receivedAt"])
     .index("by_entity", ["entityType", "entityId", "receivedAt"])
+    .index("by_run", ["runId", "receivedAt"])
+    .index("by_job", ["jobId", "receivedAt"])
+    .index("by_root_execution", ["rootExecutionId", "receivedAt"])
+    .index("by_opencode_session", ["opencodeSessionId", "receivedAt"])
     .index("by_received", ["receivedAt"]),
 });

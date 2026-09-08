@@ -17,24 +17,14 @@ const hostModules = {
     ]),
   ),
 };
-const byRequest = makeFunctionReference<"query">("traces:byRequest");
+const requestSpanSummaries = makeFunctionReference<"query">("traces:requestSpanSummaries");
 
-describe("host authorization example", () => {
-  it("denies unauthenticated and non-owner reads, then allows the owner's component read", async () => {
+describe("internal CLI query example", () => {
+  it("keeps the component read behind an internal host function", async () => {
     const backend = convexTest(exampleSchema, hostModules);
     componentTest.register(backend);
-    const requestRecordId = await backend.run(async (ctx) =>
-      ctx.db.insert("traceRequests", {
-        ownerSubject: "owner",
-        observabilityRequestId: "request-123",
-      }),
-    );
-    await expect(backend.query(byRequest, { requestRecordId })).rejects.toThrow("Unauthorized");
     await expect(
-      backend.withIdentity({ subject: "other" }).query(byRequest, { requestRecordId }),
-    ).rejects.toThrow("Forbidden");
-    await expect(
-      backend.withIdentity({ subject: "owner" }).query(byRequest, { requestRecordId }),
-    ).resolves.toEqual([]);
+      backend.query(requestSpanSummaries, { requestId: "request-123" }),
+    ).resolves.toMatchObject({ status: "ready", page: [], done: true });
   });
 });

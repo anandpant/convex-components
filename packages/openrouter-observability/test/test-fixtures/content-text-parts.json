@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": [{ "type": "text", "text": "Synthetic system instruction" }]
+    },
+    { "role": "user", "content": "Synthetic request" }
+  ]
+}

@@ -254,6 +254,10 @@ describe("OpenRouter observability component", () => {
         expect.objectContaining({ parentSpanId: "a44772891b0e7515", spanType: "span" }),
       ]),
     );
+    expect(await backend.query(api.queries.getCorrelationProjectionCoverage, {})).toEqual({
+      state: "ready",
+      processedSpans: 0,
+    });
   });
 
   it("deduplicates sequential and concurrent redelivery", async () => {
@@ -307,69 +311,90 @@ describe("OpenRouter observability component", () => {
     expect(spans[0]).not.toHaveProperty("output");
   });
 
-  it("supports every bounded correlation query and exclusive cursors", async () => {
+  it("returns compact complete correlation pages and a separate full-span export", async () => {
     const backend = createBackend();
     const root = parseOpenRouterOtlpDelivery(JSON.parse(loadFixture()))[0];
     if (!root) throw new Error("fixture must contain a root span");
+    const largeContent = "x".repeat(400_000);
+    const hostileMetadata = "\u0000\n\t😀".repeat(200);
     await backend.run(async (ctx) => {
-      for (let index = 0; index < 3; index += 1) {
+      for (let index = 0; index < 8; index += 1) {
         await ctx.db.insert("spans", {
           ...root,
           traceId: "correlated-trace",
-          spanId: `span-${index}`,
+          spanId: `span-${index}-${hostileMetadata}`,
+          parentSpanId: hostileMetadata,
+          name: hostileMetadata,
+          serviceName: hostileMetadata,
+          runId: hostileMetadata,
+          jobId: hostileMetadata,
+          rootExecutionId: hostileMetadata,
+          opencodeSessionId: hostileMetadata,
           entityType: "record",
           entityId: "record-123",
+          traceName: hostileMetadata,
+          spanType: hostileMetadata,
+          requestModel: hostileMetadata,
+          responseModel: hostileMetadata,
+          providerName: hostileMetadata,
+          finishReason: hostileMetadata,
+          input: largeContent,
+          output: largeContent,
           receivedAt: 100,
         });
       }
     });
 
-    expect(
-      await backend.query(api.queries.getTrace, { traceId: "correlated-trace" }),
-    ).toMatchObject({
-      page: expect.arrayContaining([expect.objectContaining({ spanId: "span-0" })]),
-      done: true,
-    });
-    expect(
-      await backend.query(api.queries.getSpan, {
-        traceId: "correlated-trace",
-        spanId: "span-0",
-      }),
-    ).toMatchObject({ spanId: "span-0" });
+    const summaries: Array<{ spanDocumentId: string; input?: string; output?: string }> = [];
+    const pageSizes: number[] = [];
+    let cursor: { receivedAt: number; _creationTime: number } | undefined;
+    while (true) {
+      const result = await backend.query(api.queries.pageCorrelationSummaries, {
+        correlation: { kind: "request", requestId: root.requestId ?? "" },
+        cursor,
+      });
+      expect(result.status).toBe("ready");
+      if (result.status !== "ready") throw new Error("request projection must be ready");
+      expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(
+        32 * 1024,
+      );
+      expect(result.page.length).toBeGreaterThan(0);
+      pageSizes.push(result.page.length);
+      summaries.push(...result.page);
+      if (result.done) break;
+      cursor = result.cursor;
+    }
+    expect(summaries).toHaveLength(8);
+    expect(pageSizes[0]).toBeLessThan(7);
+    expect(summaries[0]).not.toHaveProperty("input");
+    expect(summaries[0]).not.toHaveProperty("output");
+    expect(summaries[0]).toMatchObject({ inputUtf8Bytes: 400_000, outputUtf8Bytes: 400_000 });
 
-    const firstPage = await backend.query(api.queries.listBySession, {
-      sessionId: root.sessionId ?? "",
-      limit: 2,
+    const first = summaries[0];
+    if (!first) throw new Error("summary must provide a full-span reference");
+    const full = await backend.query(api.queries.exportFullSpan, {
+      spanDocumentId: first.spanDocumentId as never,
     });
-    const last = firstPage.at(-1);
-    if (!last) throw new Error("first page must contain a cursor row");
-    const secondPage = await backend.query(api.queries.listBySession, {
-      sessionId: root.sessionId ?? "",
-      limit: 2,
-      before: { receivedAt: last.receivedAt, _creationTime: last._creationTime },
+    expect(full?.input).toHaveLength(400_000);
+    expect(full?.output).toHaveLength(400_000);
+
+    const userResult = await backend.query(api.queries.pageCorrelationSummaries, {
+      correlation: { kind: "user", userId: root.userId ?? "" },
+      limit: 1,
     });
-    expect([...firstPage, ...secondPage]).toHaveLength(3);
-    expect(await backend.query(api.queries.listByUser, { userId: root.userId ?? "" })).toHaveLength(
-      3,
-    );
-    expect(
-      await backend.query(api.queries.listByRequest, { requestId: root.requestId ?? "" }),
-    ).toHaveLength(3);
-    expect(
-      await backend.query(api.queries.listByEntity, {
-        entityType: "record",
-        entityId: "record-123",
-      }),
-    ).toHaveLength(3);
-    expect(await backend.query(api.queries.listRecent, {})).toHaveLength(3);
-    await expect(backend.query(api.queries.listRecent, { limit: 9 })).rejects.toThrow(
-      "limit must be a positive integer no greater than 8",
+    expect(userResult).toMatchObject({
+      status: "ready",
+      page: [{ spanDocumentId: expect.any(String) }],
+    });
+
+    await expect(backend.query(api.queries.pageRecentSummaries, { limit: 8 })).rejects.toThrow(
+      "limit must be a positive integer no greater than 7",
     );
   });
 
   it.each([
     ["empty", 0],
-    ["exact page", 7],
+    ["exact page", 6],
     ["more than the former cap", 9],
     ["maximum realistic trace", 64],
   ])("exhausts an %s trace without ambiguity", async (_name, spanCount) => {
@@ -388,13 +413,13 @@ describe("OpenRouter observability component", () => {
     });
 
     const spanIds: string[] = [];
-    let afterSpanId: string | undefined;
+    let cursor: string | undefined;
     let pages = 0;
     while (true) {
-      const result = await backend.query(api.queries.getTrace, {
+      const result = await backend.query(api.queries.pageTraceSummaries, {
         traceId: "paged-trace",
-        limit: 7,
-        afterSpanId,
+        limit: 6,
+        cursor: cursor as never,
       });
       pages += 1;
       spanIds.push(...result.page.map((span) => span.spanId));
@@ -402,14 +427,63 @@ describe("OpenRouter observability component", () => {
         expect(result.cursor).toBeUndefined();
         break;
       }
-      expect(result.cursor).toBe(result.page.at(-1)?.spanId);
-      afterSpanId = result.cursor;
+      expect(result.cursor).toBe(result.page.at(-1)?.spanDocumentId);
+      cursor = result.cursor;
     }
 
     expect(spanIds).toEqual(
       Array.from({ length: spanCount }, (_, index) => `span-${index.toString().padStart(3, "0")}`),
     );
-    expect(pages).toBe(Math.max(1, Math.ceil(spanCount / 7)));
+    expect(pages).toBe(Math.max(1, Math.ceil(spanCount / 6)));
+  });
+
+  it("backfills fixed correlation projections before indexed queries become ready", async () => {
+    vi.useFakeTimers();
+    const backend = createBackend();
+    await backend.run(async (ctx) => {
+      await ctx.db.insert("migrationState", {
+        name: "prismantix-spans-v1",
+        startedAt: 1,
+        completedAt: 1,
+      });
+      for (let index = 0; index < 3; index += 1) {
+        await ctx.db.insert("spans", {
+          traceId: "legacy",
+          spanId: `span-${index}`,
+          name: "legacy",
+          attributes: [{ key: "trace.metadata.job_id", valueJson: '{"stringValue":"job-123"}' }],
+          resourceAttributes: [],
+          receivedAt: index,
+        });
+      }
+    });
+
+    await expect(
+      backend.query(api.queries.pageCorrelationSummaries, {
+        correlation: { kind: "job", jobId: "job-123" },
+      }),
+    ).resolves.toMatchObject({ status: "not_ready", coverage: { state: "not_started" } });
+
+    await expect(
+      backend.mutation(internal.ingest.admit, {
+        rawBody: JSON.stringify({ resourceSpans: [] }),
+        isTestConnection: false,
+      }),
+    ).resolves.toMatchObject({ kind: "accepted" });
+    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
+    expect(await backend.query(api.queries.getCorrelationProjectionCoverage, {})).toEqual({
+      state: "ready",
+      processedSpans: 3,
+    });
+    const result = await backend.query(api.queries.pageCorrelationSummaries, {
+      correlation: { kind: "job", jobId: "job-123" },
+    });
+    expect(result).toMatchObject({ status: "ready", done: true });
+    if (result.status !== "ready") throw new Error("backfill must make the index ready");
+    expect(result.page).toHaveLength(3);
+    expect(await storedSpans(backend)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ jobId: "job-123", attributes: [] })]),
+    );
   });
 
   it("deletes expired rows across bounded retention batches", async () => {
@@ -522,7 +596,7 @@ describe("OpenRouter observability component", () => {
       await backend.run(async (ctx) =>
         (await ctx.db.query("migrationState").collect()).map(({ name }) => name).sort(),
       ),
-    ).toEqual(["prismantix-deliveries-v1", "prismantix-spans-v1"]);
+    ).toEqual(["correlation-projections-v1", "prismantix-deliveries-v1", "prismantix-spans-v1"]);
 
     await backend.run(async (ctx) => {
       await ctx.db.insert("spans", {

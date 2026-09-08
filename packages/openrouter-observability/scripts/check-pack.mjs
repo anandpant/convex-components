@@ -21,6 +21,7 @@ const tarball = join(packDirectory, tarballs[0]);
 const entries = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
 for (const required of [
   "package/LICENSE",
+  "package/CHANGELOG.md",
   "package/dist/client.js",
   "package/dist/client.d.ts",
   "package/dist/content.js",

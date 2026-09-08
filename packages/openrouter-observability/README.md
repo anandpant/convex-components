@@ -1,6 +1,6 @@
 # OpenRouter observability for Convex
 
-`@shpitdev/convex-openrouter-observability` receives OpenRouter Broadcast OTLP JSON inside your existing Convex deployment. It stores typed spans in component-owned tables so your host Convex functions can query traces by user, session, request, or application entity.
+`@shpitdev/convex-openrouter-observability` receives OpenRouter Broadcast OTLP JSON inside your existing Convex deployment. It stores typed spans in component-owned tables so your host Convex functions can query traces by user, session, request, or application entity. A host-owned adapter stores inline images and large content outside Convex.
 
 The component is specific to OpenRouter Broadcast traces. It is not a general OTLP collector.
 
@@ -10,23 +10,18 @@ The component is specific to OpenRouter Broadcast traces. It is not a general OT
 pnpm add @shpitdev/convex-openrouter-observability
 ```
 
-Register the component and pass the webhook token from the host deployment:
+Register the component without an HTTP prefix. The host owns the webhook route because it also owns the blob credentials:
 
 ```ts
 // convex/convex.config.ts
 import openrouterObservability from "@shpitdev/convex-openrouter-observability/convex.config.js";
 import { defineApp } from "convex/server";
-import { v } from "convex/values";
 
-const app = defineApp({
-  env: { OPENROUTER_OBSERVABILITY_TOKEN: v.optional(v.string()) },
-});
+const app = defineApp();
 
 app.use(openrouterObservability, {
   name: "openrouterObservability",
-  httpPrefix: "/openrouter/",
   env: {
-    WEBHOOK_TOKEN: app.env.OPENROUTER_OBSERVABILITY_TOKEN,
     RETENTION_DAYS: "30",
   },
 });
@@ -34,8 +29,48 @@ app.use(openrouterObservability, {
 export default app;
 ```
 
-The optional binding lets preview deployments install before their secret is provisioned. The
-ingestion routes fail closed with `401` until the token is set.
+When upgrading from 0.2, remove the old `httpPrefix` and `WEBHOOK_TOKEN` options from `app.use`. Convex rejects an HTTP prefix for this version because the component intentionally has no mounted routes.
+
+Mount the handler at the existing public URL in the host `convex/http.ts`. Both methods must point at the same handler because OpenRouter uses either one depending on destination configuration:
+
+```ts
+import {
+  handleOpenRouterTraceRequest,
+  resolveTraceBlob,
+  type TraceBlobPut,
+} from "@shpitdev/convex-openrouter-observability";
+import { components } from "./_generated/api";
+import { httpAction } from "./_generated/server";
+import { httpRouter } from "convex/server";
+import { putTraceBlob } from "./traceBlobStorage";
+
+const http = httpRouter();
+
+const ingestOpenRouterTrace = httpAction(
+  async (ctx, request) =>
+    await handleOpenRouterTraceRequest(ctx, request, {
+      component: components.openrouterObservability,
+      bearerToken: process.env.OPENROUTER_OBSERVABILITY_TOKEN,
+      blobPrefix: "observability/openrouter/v1",
+      blobStorage: {
+        put: async (object: TraceBlobPut) => await putTraceBlob(ctx, object),
+      },
+    }),
+);
+
+for (const method of ["POST", "PUT"] as const) {
+  http.route({ path: "/openrouter/traces", method, handler: ingestOpenRouterTrace });
+}
+http.route({
+  path: "/openrouter/health",
+  method: "GET",
+  handler: httpAction(async () => new Response("ok", { status: 200 })),
+});
+
+export default http;
+```
+
+`putTraceBlob` is application code. It can write to R2, S3, or another binary object store. The package never reads storage credentials. `put` receives a deterministic key, bytes, content type, byte length, SHA-256 digest, and binary-or-UTF-8 encoding. It must treat a retry of the same key and bytes as success. A presigned upload that overwrites the deterministic key satisfies that contract. Keep separate environments in separate buckets or prefixes.
 
 Configure an OpenRouter Broadcast webhook at:
 
@@ -49,7 +84,7 @@ Set its custom header to:
 { "Authorization": "Bearer <deployment-specific-secret>" }
 ```
 
-The mounted routes are:
+The host routes are:
 
 | Method | Path      | Result            |
 | ------ | --------- | ----------------- |
@@ -59,6 +94,8 @@ The mounted routes are:
 
 `RETENTION_DAYS` is optional and defaults to 30. It accepts integer strings from 1 through 3650. A daily job deletes expired spans in indexed batches.
 Invalid retention configuration makes the cleanup job fail. Treat that as an operational configuration error and alert on failed Convex cron runs. `/health` is only a liveness route and does not report retention readiness.
+
+Configure object-store lifecycle deletion on the dedicated trace prefix. For a 30-day component retention period, 35 days is a practical blob lifetime: full spans disappear first, then the store removes their objects and any uploads orphaned by a failed Convex mutation. The adapter intentionally has no delete or reference-count contract.
 
 The initial release also performs a bounded, idempotent migration for deployments upgrading from
 the former Prismantix-local component: it adds compact deduplication keys, fills the newly separated
@@ -108,21 +145,46 @@ Production-read validation against one Meshix request found 36 generation spans 
 
 ## Typed content decoding
 
-`decodeOpenRouterInput` and `decodeOpenRouterOutput` return explicit `absent`, `invalid`, `unsupported`, or `decoded` outcomes while retaining the original string and parsed value. Supported input messages include system, user, assistant, and tool roles with string, null, or text-part-array content. Assistant `tool_calls` are emitted calls from message history. Output `tools` are request tool definitions and never become emitted calls. `reasoning_details` remains opaque, including encrypted entries.
+`decodeOpenRouterInput` and `decodeOpenRouterOutput` return explicit `absent`, `invalid`, `unsupported`, or `decoded` outcomes while retaining the stored string and parsed value. Supported input messages include system, user, assistant, and tool roles. Message content can be a string, null, an externalized text reference, or an ordered part array.
 
-Valid JSON with an unfamiliar role or content part is `unsupported`; the decoder does not discard unknown multimodal data. A production-read replay decoded all 36 inputs and outputs in the sampled Meshix request, including the text-part input on the Gemini preprocessing span. That replay validates the decoder locally against production-read data. It is not deployed query proof.
+Part arrays decode text, `image_url`, and unknown parts without losing their original order. An image source is one of:
+
+- `blob`, for an inline image moved to host storage;
+- `external_url`, for a remote URL that the handler did not fetch;
+- `unavailable`, for an upstream placeholder such as `redacted`.
+
+Unknown parts remain typed as `opaque` with their stored value. Assistant `tool_calls` are emitted calls from message history. Output `tools` are request tool definitions and never become emitted calls. `reasoning_details` remains opaque, including encrypted entries.
+
+Valid JSON with an unfamiliar role is `unsupported`. An unfamiliar content part is `opaque`, not a reason to discard the whole message. Historical OpenRouter traces may contain only `redacted` image placeholders; this package cannot recover image bytes that OpenRouter did not send.
 
 ## Ingestion behavior
 
 - Bearer tokens are compared through fixed-length SHA-256 digests.
-- Only JSON bodies up to 900 KiB are accepted. The HTTP action counts bytes while reading the stream and cancels it as soon as the limit is exceeded. `Content-Length` can reject an obviously oversized body early but never replaces the streamed count.
+- JSON bodies default to an 8 MiB cap. The host handler counts bytes while reading the stream and cancels it as soon as the limit is exceeded. `Content-Length` can reject an obviously oversized body early but never replaces the streamed count. Hosts may configure a lower cap.
+- One extracted blob defaults to a 6 MiB cap. All extracted bytes in one request also fit under the request cap. Strings above 64 KiB move to blob storage; hosts may lower that threshold.
+- The handler decodes explicit data URLs and recognized binary fields. It does not guess that arbitrary text is base64.
+- Input or output JSON containing integers outside JavaScript's safe range, or non-finite exponents, moves as one exact UTF-8 JSON blob. This preserves number lexemes, duplicate keys, escapes, and key order instead of silently rounding during parsing.
+- The handler recursively replaces externalized input, output, attributes, resource attributes, events, links, and status values before calling the component mutation. The mutation rejects data URLs, recognized binary fields, and oversized strings that bypassed preparation.
+- Remote URLs are never fetched. A host can provide `mapRemoteUrl` to replace its own ephemeral signed URL with a stable owned reference; otherwise the original URL stays an external reference.
 - Empty authenticated OpenRouter Test Connection envelopes return `204` without writes.
 - OTLP resource spans, scope spans, spans, attributes, events, and links have explicit count limits.
 - Expanded stored spans are size-checked before admission so shared resource metadata cannot exceed Convex document or transaction limits through fan-out.
-- A delivery writes all new spans in one mutation. Invalid input writes nothing.
+- The handler validates and plans the complete delivery, uploads deterministic objects, then writes all new spans in one mutation. Invalid input or an upload failure writes no spans. A mutation failure can leave objects until the prefix lifecycle removes them.
 - `(traceId, spanId)` identifies duplicates. New deliveries return `202`; duplicate-only deliveries return `204`.
-- Known correlation, model, token, and cost values get typed columns. Unknown span and resource attributes retain their order and original OTLP typed values as JSON.
+- Known correlation, model, token, and cost values get typed columns. Unknown span and resource attributes retain their order and OTLP typed values, with large or binary values replaced by durable references.
 - The component does not keep raw webhook bodies.
+
+## Resolving stored blobs
+
+Component queries return references and never download objects or mint signed URLs. After the host authorizes access to the owning request or application record, resolve a reference against the exported span:
+
+```ts
+const result = await resolveTraceBlob(reader, exportedSpan, reference, {
+  maxBytes: 6 * 1024 * 1024,
+});
+```
+
+`TraceBlobReader.get` receives the same `maxBytes` limit. `resolveTraceBlob` first verifies that the reference belongs to the stored span, then checks the returned byte length and SHA-256 digest. Keep any presigned URL inside the reader callback. Do not return it to the client or persist it as owned-asset identity.
 
 ## OpenRouter request metadata
 

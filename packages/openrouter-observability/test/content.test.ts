@@ -34,7 +34,7 @@ describe("OpenRouter content decoding", () => {
     expect(result.content.messages[0]).toMatchObject({
       role: "system",
       content: {
-        kind: "text_parts",
+        kind: "parts",
         parts: [{ type: "text", text: "system text", raw: { type: "text", text: "system text" } }],
       },
     });
@@ -59,7 +59,7 @@ describe("OpenRouter content decoding", () => {
           {
             role: "system",
             content: {
-              kind: "text_parts",
+              kind: "parts",
               parts: [{ type: "text", text: "Synthetic system instruction" }],
             },
           },
@@ -109,7 +109,10 @@ describe("OpenRouter content decoding", () => {
       decodeOpenRouterInput(
         JSON.stringify({ messages: [{ role: "user", content: [{ type: "image", url: "x" }] }] }),
       ),
-    ).toMatchObject({ kind: "unsupported" });
+    ).toMatchObject({
+      kind: "decoded",
+      content: { messages: [{ content: { parts: [{ type: "opaque" }] } }] },
+    });
     expect(
       decodeOpenRouterInput(JSON.stringify({ messages: [{ role: "tool", content: "x" }] })),
     ).toMatchObject({ kind: "unsupported" });

@@ -5,9 +5,11 @@ import { fileURLToPath } from "node:url";
 import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "../src/component/_generated/api.js";
+import type { ComponentApi } from "../src/component/_generated/component.js";
 import { parseOpenRouterOtlpDelivery } from "../src/component/parser.js";
 import schema from "../src/component/schema.js";
-import { readBoundedBody } from "../src/component/http.js";
+import { handleOpenRouterTraceRequest, readBoundedTraceBody } from "../src/ingestion.js";
+import type { TraceBlobPut, TraceBlobStorage } from "../src/blobContent.js";
 
 const modules = import.meta.glob("../src/component/**/*.ts");
 const TOKEN = "test-openrouter-observability-token";
@@ -32,8 +34,25 @@ async function post(
   backend: ReturnType<typeof createBackend>,
   body: string,
   headers: HeadersInit = JSON_HEADERS,
+  storage: TraceBlobStorage = { put: async () => undefined },
+  method: "POST" | "PUT" = "POST",
 ) {
-  return await backend.fetch("/traces", { method: "POST", headers, body });
+  return await handleOpenRouterTraceRequest(
+    {
+      runMutation: async (_reference, args) =>
+        await backend.mutation(api.ingest.admitPrepared, args as never),
+    },
+    new Request("https://example.test/openrouter/traces", {
+      method,
+      headers,
+      body,
+    }),
+    {
+      component: api as unknown as ComponentApi,
+      bearerToken: TOKEN,
+      blobStorage: storage,
+    },
+  );
 }
 
 function envelope(span: Record<string, unknown>) {
@@ -52,12 +71,6 @@ describe("OpenRouter observability component", () => {
     delete process.env.RETENTION_DAYS;
   });
 
-  it("serves its health route", async () => {
-    const response = await createBackend().fetch("/health");
-    expect(response.status).toBe(200);
-    expect(await response.text()).toBe("ok");
-  });
-
   it.each([
     ["missing authorization", { "content-type": "application/json" }, 401],
     ["wrong bearer token", { ...JSON_HEADERS, authorization: "Bearer wrong" }, 401],
@@ -70,9 +83,20 @@ describe("OpenRouter observability component", () => {
   });
 
   it("fails closed when the webhook token is not configured", async () => {
-    delete process.env.WEBHOOK_TOKEN;
     const backend = createBackend();
-    const response = await post(backend, loadFixture());
+    const response = await handleOpenRouterTraceRequest(
+      { runMutation: async () => Promise.reject(new Error("must not run")) },
+      new Request("https://example.test/traces", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: loadFixture(),
+      }),
+      {
+        component: api as unknown as ComponentApi,
+        bearerToken: undefined,
+        blobStorage: { put: async () => undefined },
+      },
+    );
     expect(response.status).toBe(401);
     expect(await storedSpans(backend)).toHaveLength(0);
   });
@@ -86,7 +110,7 @@ describe("OpenRouter observability component", () => {
 
   it("rejects HTTP and structural bounds without writes", async () => {
     const backend = createBackend();
-    const oversized = `"${"a".repeat(900 * 1024)}"`;
+    const oversized = `"${"a".repeat(8 * 1024 * 1024)}"`;
     expect((await post(backend, oversized)).status).toBe(413);
     const tooManySpans = {
       resourceSpans: [
@@ -133,18 +157,26 @@ describe("OpenRouter observability component", () => {
     const stream = new ReadableStream<Uint8Array>({
       pull(controller) {
         pulls += 1;
-        controller.enqueue(new Uint8Array(300 * 1024));
+        controller.enqueue(new Uint8Array(3 * 1024 * 1024));
       },
       cancel() {
         cancelled = true;
       },
     });
-    const response = await backend.fetch("/traces", {
-      method: "POST",
-      headers: { ...JSON_HEADERS, "content-length": "1" },
-      body: stream,
-      duplex: "half",
-    } as RequestInit);
+    const response = await handleOpenRouterTraceRequest(
+      { runMutation: async () => Promise.reject(new Error("must not run")) },
+      new Request("https://example.test/traces", {
+        method: "POST",
+        headers: { ...JSON_HEADERS, "content-length": "1" },
+        body: stream,
+        duplex: "half",
+      } as RequestInit),
+      {
+        component: api as unknown as ComponentApi,
+        bearerToken: TOKEN,
+        blobStorage: { put: async () => undefined },
+      },
+    );
 
     expect(response.status).toBe(413);
     expect(pulls).toBeLessThanOrEqual(5);
@@ -156,7 +188,7 @@ describe("OpenRouter observability component", () => {
     let pulled = false;
     const request = new Request("https://example.test/traces", {
       method: "POST",
-      headers: { "content-length": String(900 * 1024 + 1) },
+      headers: { "content-length": String(8 * 1024 * 1024 + 1) },
       body: new ReadableStream({
         pull(controller) {
           pulled = true;
@@ -167,7 +199,7 @@ describe("OpenRouter observability component", () => {
       duplex: "half",
     } as RequestInit);
 
-    expect(await readBoundedBody(request)).toEqual({ kind: "too_large" });
+    expect(await readBoundedTraceBody(request, 8 * 1024 * 1024)).toEqual({ kind: "too_large" });
     expect(pulled).toBe(false);
   });
 
@@ -186,48 +218,10 @@ describe("OpenRouter observability component", () => {
       duplex: "half",
     } as RequestInit);
 
-    expect(await readBoundedBody(request)).toEqual({ kind: "body", text: '{"message":"café"}' });
-  });
-
-  it("accepts a duplicate-only expanded delivery without rewriting spans", async () => {
-    const backend = createBackend();
-    const expandedDelivery = {
-      resourceSpans: [
-        {
-          resource: {
-            attributes: [{ key: "large.resource", value: { stringValue: "x".repeat(200 * 1024) } }],
-          },
-          scopeSpans: [
-            {
-              spans: Array.from({ length: 64 }, (_, index) => ({
-                traceId: "trace",
-                spanId: `span-${index}`,
-                name: "expanded resource metadata",
-              })),
-            },
-          ],
-        },
-      ],
-    };
-    const parsed = parseOpenRouterOtlpDelivery(expandedDelivery);
-    await backend.run(async (ctx) => {
-      await ctx.db.insert("migrationState", {
-        name: "prismantix-spans-v1",
-        startedAt: Date.now(),
-        completedAt: Date.now(),
-      });
-      for (const span of parsed) {
-        const spanDocumentId = await ctx.db.insert("spans", { ...span, receivedAt: 0 });
-        await ctx.db.insert("spanKeys", {
-          traceId: span.traceId,
-          spanId: span.spanId,
-          spanDocumentId,
-        });
-      }
-    });
-
-    expect((await post(backend, JSON.stringify(expandedDelivery))).status).toBe(204);
-    expect(await storedSpans(backend)).toHaveLength(64);
+    const result = await readBoundedTraceBody(request, 1024);
+    expect(result.kind).toBe("body");
+    if (result.kind !== "body") throw new Error("body must be accepted");
+    expect(new TextDecoder().decode(result.bytes)).toBe('{"message":"café"}');
   });
 
   it("accepts authenticated Test Connection with no write", async () => {
@@ -242,11 +236,7 @@ describe("OpenRouter observability component", () => {
 
   it.each(["POST", "PUT"] as const)("atomically ingests a real fixture over %s", async (method) => {
     const backend = createBackend();
-    const response = await backend.fetch("/traces", {
-      method,
-      headers: JSON_HEADERS,
-      body: loadFixture(),
-    });
+    const response = await post(backend, loadFixture(), JSON_HEADERS, undefined, method);
     expect(response.status).toBe(202);
     expect(await storedSpans(backend)).toEqual(
       expect.arrayContaining([
@@ -267,16 +257,13 @@ describe("OpenRouter observability component", () => {
     expect((await post(backend, rawBody)).status).toBe(204);
 
     const freshBackend = createBackend();
+    const writes: TraceBlobPut[] = [];
+    const storage = { put: async (object: TraceBlobPut) => void writes.push(object) };
     const results = await Promise.all([
-      freshBackend.mutation(internal.ingest.admit, { rawBody, isTestConnection: false }),
-      freshBackend.mutation(internal.ingest.admit, { rawBody, isTestConnection: false }),
+      post(freshBackend, rawBody, JSON_HEADERS, storage),
+      post(freshBackend, rawBody, JSON_HEADERS, storage),
     ]);
-    expect(
-      results.reduce(
-        (count, result) => count + (result.kind === "accepted" ? result.admitted : 0),
-        0,
-      ),
-    ).toBe(2);
+    expect(results.map(({ status }) => status).sort()).toEqual([202, 204]);
     expect(await storedSpans(freshBackend)).toHaveLength(2);
   });
 
@@ -464,12 +451,9 @@ describe("OpenRouter observability component", () => {
       }),
     ).resolves.toMatchObject({ status: "not_ready", coverage: { state: "not_started" } });
 
-    await expect(
-      backend.mutation(internal.ingest.admit, {
-        rawBody: JSON.stringify({ resourceSpans: [] }),
-        isTestConnection: false,
-      }),
-    ).resolves.toMatchObject({ kind: "accepted" });
+    await expect(backend.mutation(api.ingest.admitPrepared, { spans: [] })).resolves.toMatchObject({
+      kind: "accepted",
+    });
     await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
     expect(await backend.query(api.queries.getCorrelationProjectionCoverage, {})).toEqual({
       state: "ready",

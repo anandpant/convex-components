@@ -12,13 +12,39 @@ export {
   decodeOpenRouterOutput,
   type ContentDecodeOutcome,
   type DecodedInputContent,
+  type DecodedContentPart,
+  type DecodedText,
+  type ImageContentPart,
   type DecodedMessage,
   type DecodedMessageContent,
   type DecodedOutputContent,
   type EmittedToolCall,
+  type OpaqueContentPart,
   type TextContentPart,
   type ToolDefinition,
 } from "./content.js";
+export {
+  isTraceBlobRef,
+  findTraceBlobRefs,
+  resolveTraceBlob,
+  traceBlobRefFromMarker,
+  TRACE_BLOB_MARKER,
+  UNSAFE_JSON_NUMBER_MARKER,
+  TraceContentBoundExceededError,
+  TraceContentInvalidError,
+  type RemoteTraceBlobMapper,
+  type TraceBlobLimits,
+  type TraceBlobMarker,
+  type TraceBlobPut,
+  type TraceBlobReader,
+  type TraceBlobRef,
+  type TraceBlobStorage,
+} from "./blobContent.js";
+export {
+  handleOpenRouterTraceRequest,
+  readBoundedTraceBody,
+  type OpenRouterTraceHandlerOptions,
+} from "./ingestion.js";
 
 type QueryContext = Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
 type MutationContext = Pick<GenericMutationCtx<GenericDataModel>, "runQuery">;

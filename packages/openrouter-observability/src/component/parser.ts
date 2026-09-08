@@ -418,7 +418,10 @@ function extractSpan(
   };
 }
 
-export function parseOpenRouterOtlpDelivery(value: unknown) {
+export function parseOpenRouterOtlpDelivery(
+  value: unknown,
+  options: { enforceStoredSpanBound?: boolean } = {},
+) {
   const delivery = requireRecord(value, "delivery");
   const resourceSpans = requireArray(delivery.resourceSpans, "delivery.resourceSpans");
   checkCount(resourceSpans.length, OPENROUTER_OTLP_LIMITS.resourceSpans, "delivery.resourceSpans");
@@ -449,12 +452,14 @@ export function parseOpenRouterOtlpDelivery(value: unknown) {
       }
     }
   }
-  for (const span of parsedSpans) {
-    const spanBytes = getConvexSize({ ...span, receivedAt: 0 });
-    if (spanBytes > MAX_STORED_SPAN_BYTES) {
-      throw new OtlpBoundExceededError(
-        `stored span exceeds the limit of ${MAX_STORED_SPAN_BYTES} bytes`,
-      );
+  if (options.enforceStoredSpanBound !== false) {
+    for (const span of parsedSpans) {
+      const spanBytes = getConvexSize({ ...span, receivedAt: 0 });
+      if (spanBytes > MAX_STORED_SPAN_BYTES) {
+        throw new OtlpBoundExceededError(
+          `stored span exceeds the limit of ${MAX_STORED_SPAN_BYTES} bytes`,
+        );
+      }
     }
   }
   return parsedSpans;

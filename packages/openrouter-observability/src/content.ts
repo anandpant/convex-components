@@ -1,3 +1,5 @@
+import { traceBlobRefFromMarker, type TraceBlobRef } from "./blobContent.js";
+
 export type ContentDecodeOutcome<T> =
   | { kind: "absent" }
   | { kind: "invalid"; raw: string; error: string; value?: unknown }
@@ -8,7 +10,7 @@ export type ToolDefinition = {
   type: "function";
   function: {
     name: string;
-    description?: string;
+    description?: DecodedText;
     parameters?: unknown;
   };
 };
@@ -18,14 +20,29 @@ export type EmittedToolCall = {
   type: "function";
   function: {
     name: string;
-    arguments: string;
+    arguments: DecodedText;
   };
 };
 
-export type TextContentPart = { type: "text"; text: string; raw: unknown };
+export type DecodedText = string | { kind: "blob_text"; ref: TraceBlobRef };
+
+export type TextContentPart = { type: "text"; text: DecodedText; raw: unknown };
+
+export type ImageContentPart = {
+  type: "image_url";
+  image:
+    | { kind: "blob"; ref: TraceBlobRef; detail?: string }
+    | { kind: "external_url"; url: string; detail?: string }
+    | { kind: "unavailable"; value: unknown; detail?: string };
+  raw: unknown;
+};
+
+export type OpaqueContentPart = { type: "opaque"; value: unknown; raw: unknown };
+
+export type DecodedContentPart = TextContentPart | ImageContentPart | OpaqueContentPart;
 
 export type DecodedMessageContent =
-  string | null | { kind: "text_parts"; parts: TextContentPart[] };
+  DecodedText | null | { kind: "parts"; parts: DecodedContentPart[] };
 
 type MessageBase = {
   content: DecodedMessageContent;
@@ -48,8 +65,8 @@ export type DecodedInputContent = {
 
 export type DecodedOutputContent = {
   kind: "response";
-  text: string;
-  reasoning?: string | null;
+  text: DecodedText;
+  reasoning?: DecodedText | null;
   requestToolDefinitions: ToolDefinition[];
   rawRequest?: unknown;
 };
@@ -58,6 +75,12 @@ type JsonRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodedText(value: unknown): DecodedText | undefined {
+  if (typeof value === "string") return value;
+  const ref = traceBlobRefFromMarker(value);
+  return ref ? { kind: "blob_text", ref } : undefined;
 }
 
 function parseJson(raw: string | undefined): ContentDecodeOutcome<never> | { value: unknown } {
@@ -74,10 +97,11 @@ function emittedToolCall(value: unknown): EmittedToolCall | undefined {
     return undefined;
   }
   const fn = value.function;
-  if (!isRecord(fn) || typeof fn.name !== "string" || typeof fn.arguments !== "string") {
+  const argumentsValue = isRecord(fn) ? decodedText(fn.arguments) : undefined;
+  if (!isRecord(fn) || typeof fn.name !== "string" || argumentsValue === undefined) {
     return undefined;
   }
-  return { id: value.id, type: "function", function: { name: fn.name, arguments: fn.arguments } };
+  return { id: value.id, type: "function", function: { name: fn.name, arguments: argumentsValue } };
 }
 
 function toolDefinition(value: unknown): ToolDefinition | undefined {
@@ -86,12 +110,13 @@ function toolDefinition(value: unknown): ToolDefinition | undefined {
   }
   const fn = value.function;
   if (typeof fn.name !== "string") return undefined;
-  if (fn.description !== undefined && typeof fn.description !== "string") return undefined;
+  const description = fn.description === undefined ? undefined : decodedText(fn.description);
+  if (fn.description !== undefined && description === undefined) return undefined;
   return {
     type: "function",
     function: {
       name: fn.name,
-      ...(fn.description === undefined ? {} : { description: fn.description }),
+      ...(description === undefined ? {} : { description }),
       ...(fn.parameters === undefined ? {} : { parameters: fn.parameters }),
     },
   };
@@ -101,19 +126,43 @@ type MessageDecode =
   { kind: "decoded"; message: DecodedMessage } | { kind: "invalid" } | { kind: "unsupported" };
 
 function decodeMessageContent(value: unknown) {
-  if (typeof value === "string" || value === null) {
-    return { kind: "decoded" as const, content: value };
+  const text = decodedText(value);
+  if (text !== undefined || value === null) {
+    return { kind: "decoded" as const, content: text ?? null };
   }
   if (!Array.isArray(value)) return { kind: "invalid" as const };
-  const parts = value.map((part): TextContentPart | undefined =>
-    isRecord(part) && part.type === "text" && typeof part.text === "string"
-      ? { type: "text", text: part.text, raw: part }
-      : undefined,
-  );
-  if (parts.some((part) => part === undefined)) return { kind: "unsupported" as const };
+  const parts = value.map((part): DecodedContentPart | undefined => {
+    if (!isRecord(part)) return { type: "opaque", value: part, raw: part };
+    if (part.type === "text") {
+      const partText = decodedText(part.text);
+      return partText === undefined ? undefined : { type: "text", text: partText, raw: part };
+    }
+    if (part.type === "image_url" && isRecord(part.image_url)) {
+      const detail = typeof part.image_url.detail === "string" ? part.image_url.detail : undefined;
+      const ref = traceBlobRefFromMarker(part.image_url.url);
+      if (ref)
+        return {
+          type: "image_url",
+          image: { kind: "blob", ref, ...(detail ? { detail } : {}) },
+          raw: part,
+        };
+      if (typeof part.image_url.url === "string") {
+        return {
+          type: "image_url",
+          image: /^https?:\/\//.test(part.image_url.url)
+            ? { kind: "external_url", url: part.image_url.url, ...(detail ? { detail } : {}) }
+            : { kind: "unavailable", value: part.image_url.url, ...(detail ? { detail } : {}) },
+          raw: part,
+        };
+      }
+      return undefined;
+    }
+    return { type: "opaque", value: part, raw: part };
+  });
+  if (parts.some((part) => part === undefined)) return { kind: "invalid" as const };
   return {
     kind: "decoded" as const,
-    content: { kind: "text_parts" as const, parts: parts as TextContentPart[] },
+    content: { kind: "parts" as const, parts: parts as DecodedContentPart[] },
   };
 }
 
@@ -192,10 +241,10 @@ export function decodeOpenRouterOutput(
     return { kind: "unsupported", raw: raw as string, value: parsed.value };
   }
   if (
-    typeof parsed.value.completion !== "string" ||
+    decodedText(parsed.value.completion) === undefined ||
     (parsed.value.reasoning !== undefined &&
       parsed.value.reasoning !== null &&
-      typeof parsed.value.reasoning !== "string") ||
+      decodedText(parsed.value.reasoning) === undefined) ||
     (parsed.value.tools !== undefined && !Array.isArray(parsed.value.tools))
   ) {
     return {
@@ -214,14 +263,20 @@ export function decodeOpenRouterOutput(
       error: "tools contains an invalid definition",
     };
   }
+  const completion = decodedText(parsed.value.completion);
+  if (completion === undefined) throw new Error("validated completion must decode");
+  const reasoning =
+    parsed.value.reasoning === undefined || parsed.value.reasoning === null
+      ? parsed.value.reasoning
+      : decodedText(parsed.value.reasoning);
   return {
     kind: "decoded",
     raw: raw as string,
     value: parsed.value,
     content: {
       kind: "response",
-      text: parsed.value.completion,
-      ...(parsed.value.reasoning === undefined ? {} : { reasoning: parsed.value.reasoning }),
+      text: completion,
+      ...(reasoning === undefined ? {} : { reasoning }),
       requestToolDefinitions: definitions as ToolDefinition[],
       ...(parsed.value.rawRequest === undefined ? {} : { rawRequest: parsed.value.rawRequest }),
     },

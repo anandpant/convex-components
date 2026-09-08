@@ -24,6 +24,8 @@ for (const required of [
   "package/CHANGELOG.md",
   "package/dist/client.js",
   "package/dist/client.d.ts",
+  "package/dist/blobContent.js",
+  "package/dist/ingestion.js",
   "package/dist/content.js",
   "package/dist/component/convex.config.js",
   "package/dist/component/_generated/component.d.ts",
@@ -77,14 +79,19 @@ try {
   writeFileSync(
     join(installDirectory, "usage.ts"),
     `${readFileSync(join(packageRoot, "example/convex/convex.config.ts"), "utf8")}
-import { decodeOpenRouterInput, OpenRouterObservability, type OpenRouterObservabilityComponent } from "@shpitdev/convex-openrouter-observability";
+import { decodeOpenRouterInput, handleOpenRouterTraceRequest, OpenRouterObservability, resolveTraceBlob, type OpenRouterObservabilityComponent, type TraceBlobStorage } from "@shpitdev/convex-openrouter-observability";
 import componentTest from "@shpitdev/convex-openrouter-observability/test";
-import type { GenericDataModel, GenericQueryCtx } from "convex/server";
+import type { GenericActionCtx, GenericDataModel, GenericQueryCtx } from "convex/server";
 declare const component: OpenRouterObservabilityComponent;
 declare const ctx: Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
+declare const actionCtx: Pick<GenericActionCtx<GenericDataModel>, "runMutation">;
+declare const request: Request;
+declare const storage: TraceBlobStorage;
 const observability = new OpenRouterObservability(component);
 void observability.pageTraceSummaries(ctx, { traceId: "trace", limit: 6 });
 void observability.pageCorrelationSummaries(ctx, { correlation: { kind: "user", userId: "user" } });
+void handleOpenRouterTraceRequest(actionCtx, request, { component, bearerToken: "token", blobStorage: storage });
+void resolveTraceBlob({ get: async () => null }, {}, { kind: "trace_blob", key: "key", sha256: "0".repeat(64), byteLength: 1, contentType: "text/plain", encoding: "utf8" }, { maxBytes: 1 });
 void decodeOpenRouterInput('{"messages":[]}');
 void componentTest;
 `,

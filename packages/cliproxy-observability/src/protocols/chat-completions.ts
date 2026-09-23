@@ -1,6 +1,6 @@
 import type { RecordValue } from "./types.js";
 import { append, count, list, object } from "./values.js";
-export function assembleChatStream(events: RecordValue[], done: boolean) {
+export function assembleChatStream(events: RecordValue[], done: boolean, stockCompleted = false) {
   const response: RecordValue = {};
   let invalid = false,
     recognized = false,
@@ -83,7 +83,12 @@ export function assembleChatStream(events: RecordValue[], done: boolean) {
     }
   }
   response.choices = [...choices.entries()].toSorted(([a], [b]) => a - b).map(([, value]) => value);
-  terminal = done || response.error !== undefined;
+  terminal =
+    done ||
+    response.error !== undefined ||
+    (stockCompleted &&
+      choices.size > 0 &&
+      [...choices.values()].every((choice) => typeof choice.finish_reason === "string"));
 
   return { response, invalid, recognized, unsupported, terminal, terminalUsage };
 }

@@ -30,6 +30,8 @@ export type CaptureObservationV1 = {
   correlationConflicts?: string[];
   stockChunkIndex?: number;
   body?: string;
+  observedBodyBytes?: number;
+  bodyFraming?: "stock_json_chunk" | "stock_sse_candidate";
   contentSha256: string;
   contentBytes: number;
   completionOutcome?: string;
@@ -165,6 +167,18 @@ export async function validateObservation(
     !["succeeded", "failed", "canceled", "rejected"].includes(o.completionOutcome ?? "")
   )
     throw new Error("invalid completion outcome");
+  if (
+    o.bodyFraming !== undefined &&
+    !["stock_json_chunk", "stock_sse_candidate"].includes(o.bodyFraming)
+  )
+    throw new Error("invalid body framing");
+  if (
+    o.observedBodyBytes !== undefined &&
+    (!Number.isSafeInteger(o.observedBodyBytes) ||
+      o.observedBodyBytes < 0 ||
+      o.observedBodyBytes > MAX_ENVELOPE_BYTES)
+  )
+    throw new Error("invalid observed byte count");
   const body = decodeBody(o);
   if ((await sha256(body)) !== o.contentSha256) throw new Error("content digest mismatch");
   return {

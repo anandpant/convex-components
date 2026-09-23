@@ -10,9 +10,11 @@ import (
 // Incomplete/malformed/oversized payloads are withheld with explicit gaps, never spooled raw.
 // It frames bytes; receiver TypeScript remains the only protocol/usage normalizer.
 type FrameRedactor struct {
+	semantic         semanticRedactor
 	pending          []byte
 	first            uint64
 	allowUndelimited bool
+	allowJSON        bool
 }
 
 var sensitive = map[string]bool{"authorization": true, "api_key": true, "apikey": true, "api-key": true, "x-api-key": true, "access_token": true, "refresh_token": true, "id_token": true, "cookie": true, "set-cookie": true, "password": true, "secret": true, "token": true}
@@ -79,12 +81,26 @@ func scrubJSONDepth(b []byte, secrets []string, depth int) ([]byte, bool) {
 	return out, err == nil
 }
 func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, secrets []string) ([]byte, *uint64, string) {
-	if len(r.pending) == 0 {
+	if r.bufferedBytes() == 0 {
 		r.first = seq
 	}
 	if len(r.pending)+len(body) > MaxBody {
 		r.pending = nil
 		return nil, nil, "redaction_frame_limit"
+	}
+	// Stock OpenAI->OpenAI translation strips the SSE prefix and DONE before the hook.
+	// Preserve the observed chunk boundary, adding only canonical framing for transport.
+	if stream && r.allowJSON && len(r.pending) == 0 && len(body) > 0 && body[0] == '{' && json.Valid(body) {
+		clean, ok := scrubJSON(body, secrets)
+		if !ok {
+			return nil, nil, "invalid_or_unredactable_json_withheld"
+		}
+		first := r.first
+		out, gap := r.semantic.push("", clean, terminal, secrets)
+		if len(r.semantic.frames) == 0 {
+			r.first = seq + 1
+		}
+		return out, &first, gap
 	}
 	r.pending = append(r.pending, body...)
 	if !stream {
@@ -152,20 +168,26 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 			gap = "invalid_or_unredactable_sse_withheld"
 			continue
 		}
-		if event != "" {
-			out = append(out, []byte("event: "+event+"\n")...)
+		safe, reason := r.semantic.push(event, clean, false, secrets)
+		if reason != "" {
+			gap = reason
 		}
-		out = append(out, []byte("data: ")...)
-		out = append(out, clean...)
-		out = append(out, '\n', '\n')
+		out = append(out, safe...)
 	}
-	if len(r.pending) == 0 {
+	if len(r.pending) == 0 && len(r.semantic.frames) == 0 {
 		r.pending = nil
 		r.first = seq + 1
 	} else {
 		r.pending = bytes.Clone(r.pending)
 		if len(out) > 0 {
 			r.first = seq
+		}
+	}
+	if terminal {
+		safe, reason := r.semantic.push("", nil, true, secrets)
+		out = append(out, safe...)
+		if reason != "" {
+			gap = reason
 		}
 	}
 	if terminal && len(r.pending) > 0 {
@@ -190,4 +212,32 @@ func completeCandidate(frame []byte) bool {
 	}
 	raw := []byte(strings.Join(data, "\n"))
 	return len(data) > 0 && (json.Valid(raw) || string(raw) == "[DONE]")
+}
+
+func (r *FrameRedactor) bufferedBytes() int { return len(r.pending) + r.semantic.bytes }
+
+func redactMetadata(o *Observation, secrets []string) {
+	conflict := func(field string) {
+		for _, existing := range o.CorrelationConflicts {
+			if existing == field {
+				return
+			}
+		}
+		if len(o.CorrelationConflicts) < 10 {
+			o.CorrelationConflicts = append(o.CorrelationConflicts, field)
+		}
+	}
+	for _, secret := range secrets {
+		o.Model = strings.ReplaceAll(o.Model, secret, "[REDACTED]")
+		if strings.Contains(o.TraceID, secret) {
+			o.TraceID = ""
+			conflict("redacted:sourceTraceId")
+		}
+		for field, value := range o.Correlation {
+			if strings.Contains(value, secret) {
+				delete(o.Correlation, field)
+				conflict("redacted:" + field)
+			}
+		}
+	}
 }

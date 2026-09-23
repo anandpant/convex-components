@@ -7,7 +7,7 @@ import type {
 } from "convex/server";
 import type { ComponentApi } from "./component/_generated/component.js";
 import type { CaptureObservationV1 } from "./capture/index.js";
-import { MAX_ENVELOPE_BYTES, validateSegment } from "./capture/index.js";
+import { MAX_ENVELOPE_BYTES, validateSegment, sha256 } from "./capture/index.js";
 import type { ModelCallV1, PrivateContentReference } from "./model-call/index.js";
 import type { PrivateCaptureStorage } from "./content/index.js";
 import { nanoTime, protocolForRoute, PARSER_VERSION } from "./protocols/index.js";
@@ -47,6 +47,12 @@ export class CliproxyObservability {
     args: FunctionArgs<ComponentApi["queries"]["pageEventSegments"]>,
   ) {
     return ctx.runQuery(this.component.queries.pageEventSegments, args);
+  }
+  getBootHealth(
+    ctx: ReadContext,
+    args: { destinationId: string; instanceId: string; pluginBootId: string },
+  ) {
+    return ctx.runQuery(this.component.queries.getBootHealth, args);
   }
   getCaptureCoverage(ctx: ReadContext, args: { destinationId: string }) {
     return ctx.runQuery(this.component.queries.getCaptureCoverage, args);
@@ -168,10 +174,51 @@ export async function handleCliproxyCaptureRequest(
   let parsed: Awaited<ReturnType<typeof validateSegment>>;
   try {
     const raw = await readBoundedCaptureBody(request);
-    const candidate = JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(raw));
+    const candidate = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
     if (candidate?.operation === "health") {
-      if (candidate.schemaVersion !== 1 || candidate.destinationId !== options.destinationId || !options.instanceIds.includes(candidate.instanceId)) return new Response("scope mismatch",{status:403});
-      return Response.json({ready:true,destinationId:options.destinationId,deploymentId:options.deploymentId,instanceId:candidate.instanceId,schemaVersion:1});
+      if (
+        candidate.schemaVersion !== 1 ||
+        candidate.destinationId !== options.destinationId ||
+        !options.instanceIds.includes(candidate.instanceId)
+      )
+        return new Response("scope mismatch", { status: 403 });
+      return Response.json({
+        ready: true,
+        destinationId: options.destinationId,
+        deploymentId: options.deploymentId,
+        instanceId: candidate.instanceId,
+        schemaVersion: 1,
+      });
+    }
+    if (candidate?.operation === "health_record") {
+      if (
+        raw.length > 16384 ||
+        candidate.schemaVersion !== 1 ||
+        candidate.destinationId !== options.destinationId ||
+        !options.instanceIds.includes(candidate.instanceId) ||
+        !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/.test(candidate.pluginBootId) ||
+        candidate.precommitCoverage !== "unknown_before_local_commit"
+      )
+        return new Response("invalid health scope", { status: 403 });
+      const result = await ctx.runMutation(options.client.component.ingest.recordHealth, {
+        destinationId: options.destinationId,
+        instanceId: candidate.instanceId,
+        pluginBootId: candidate.pluginBootId,
+        startedAt: candidate.startedAt,
+        observedAt: candidate.observedAt,
+        observationsTotal: candidate.observationsTotal,
+        droppedObservationsTotal: candidate.droppedObservationsTotal,
+        lostControlObservationsTotal: candidate.lostControlObservationsTotal,
+        scopeConflictsTotal: candidate.scopeConflictsTotal,
+        expiredScopesTotal: candidate.expiredScopesTotal,
+        activeCalls: candidate.activeCalls,
+      });
+      return Response.json({
+        ...result,
+        digest: await sha256(raw),
+        destinationId: options.destinationId,
+        deploymentId: options.deploymentId,
+      });
     }
     parsed = await validateSegment(raw, options);
   } catch (error) {

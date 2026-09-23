@@ -1,4 +1,4 @@
-"""Three approved real protocol calls via existing dev gateway; never copy OAuth state.
+"""Explicit approved real protocol recordings via existing dev gateway; never copy OAuth state.
 
 Run only explicitly, with /run/dev-key.json mounted read-only and a private output
 mount at /recordings. This recorder is never part of CI.
@@ -34,15 +34,28 @@ try:
     proof.wait_port(8317);proof.wait_port(8318)
     records=[]
     import http.client
-    for i,(protocol,route,stream) in enumerate([('messages-sse','/v1/messages',True),('responses-sse','/v1/responses',True),('chat-json','/v1/chat/completions',False)]):
-        prompt='Reply with exactly CAPTURE_OK.'
+    mode=os.environ.get('RECORD_VARIANTS','original')
+    variants=[('chat-sse','/v1/chat/completions',True)] if mode=='chat' else [('messages-json','/v1/messages',False),('responses-json','/v1/responses',False),('chat-sse','/v1/chat/completions',True)] if mode=='counterparts' else [('messages-abort','/v1/messages',True)] if mode=='cancel' else [('messages-sse','/v1/messages',True),('responses-sse','/v1/responses',True),('chat-json','/v1/chat/completions',False)]
+    for i,(protocol,route,stream) in enumerate(variants):
+        canceled=mode=='cancel'
+        prompt='Count sequentially from 1 to 1000, one number per line.' if canceled else 'Reply with exactly CAPTURE_OK.'
         data={'model':'gpt-5.6-luna','stream':stream,'messages':[{'role':'user','content':prompt}],'max_tokens':512}
-        if route=='/v1/responses':data={'model':'gpt-5.6-luna','stream':True,'input':prompt,'max_output_tokens':512}
+        if route=='/v1/responses':data={'model':'gpt-5.6-luna','stream':stream,'input':prompt,'max_output_tokens':512}
         conn=http.client.HTTPConnection('127.0.0.1',8318,timeout=120)
         started=time.perf_counter();conn.request('POST',route,json.dumps(data),{'Authorization':'Bearer '+proof.DEV,'X-Meshix-Deployment':proof.DEPLOYMENT,'Content-Type':'application/json'})
         res=conn.getresponse();status=res.status
         # Downstream bytes are never written to disk; only the plugin's sanitized outbox is exported.
-        body=res.read();elapsed=(time.perf_counter()-started)*1000;conn.close()
+        if canceled:
+            while True:
+                line=res.readline()
+                if not line or line.startswith(b'data:'):break
+            if not line:raise RuntimeError('cancellation requires an observed stream data frame')
+            import socket
+            sock=conn.sock
+            if sock is not None:sock.shutdown(socket.SHUT_RDWR)
+            conn.close();body=b''
+        else:body=res.read()
+        elapsed=(time.perf_counter()-started)*1000;conn.close()
         if status!=200:
             category='unclassified'
             for label,needles in [('quota_or_rate_limit',[b'rate limit',b'quota',b'usage limit']),('authentication',[b'auth',b'token',b'credential']),('connection',[b'connection',b'dial tcp',b'timeout',b'lookup']),('model_routing',[b'unknown model',b'no available'])]:
@@ -52,13 +65,13 @@ try:
         groups={}
         for event in captured:groups.setdefault(event['requestId'],[]).append(event)
         call=next(events for events in groups.values() if events[0]['route']=='POST '+route)
-        if not any(e['kind']=='completion' and e.get('completionOutcome')=='succeeded' for e in call):raise RuntimeError('no successful stock completion')
+        if not any(e['kind']=='completion' and e.get('completionOutcome') in (['canceled','failed'] if canceled else ['succeeded']) for e in call):raise RuntimeError('expected stock completion outcome missing')
         joined=b''.join(base64.b64decode(e.get('body','')) for e in call if e['kind'] in ['response','stream_chunk'])
-        if not joined or any(e.get('gap') for e in call):raise RuntimeError(f'{protocol}: captured output missing or incomplete')
+        if not joined or (not canceled and any(e.get('gap') for e in call)):raise RuntimeError(f'{protocol}: captured output missing or incomplete; gaps={[(e["sequence"],e.get("gap")) for e in call if e.get("gap")]}')
         for event in call:
             payload=base64.b64decode(event.get('body',''))
             if key.encode() in payload or proof.DEV.encode() in payload or re.search(rb'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',payload):raise RuntimeError('fixture secret/account scan failed')
-        fixture={'provenance':{'kind':'real_provider_recording','recordedAt':call[0]['observedAt'],'sourceProtocol':protocol,'requestedModel':'gpt-5.6-luna','selectedUpstreamProvider':'unknown','topology':'isolated official stock 7.3.5 -> existing dev gateway -> existing OAuth owner; no copied OAuth state','stockSHA256':hashlib.sha256(Path('/stock/cli-proxy-api').read_bytes()).hexdigest(),'pluginSHA256':hashlib.sha256(Path('/capture/cliproxy-capture.so').read_bytes()).hexdigest(),'pluginVersion':'0.1.0','redactionVersion':'framed-json-v1','durationMs':elapsed,'downstreamStatus':status,'eventsSHA256':hashlib.sha256(json.dumps(call,separators=(',',':')).encode()).hexdigest()},'events':call}
+        fixture={'provenance':{'kind':'real_provider_recording','recordedAt':call[0]['observedAt'],'sourceProtocol':protocol,'requestedModel':'gpt-5.6-luna','selectedUpstreamProvider':'unknown','topology':'isolated official stock 7.3.5 -> existing dev gateway -> existing OAuth owner; no copied OAuth state','stockSHA256':hashlib.sha256(Path('/stock/cli-proxy-api').read_bytes()).hexdigest(),'pluginSHA256':hashlib.sha256(Path('/capture/cliproxy-capture.so').read_bytes()).hexdigest(),'pluginVersion':'0.1.0','redactionVersion':call[0]['redactionVersion'],'scenario':'client_cancellation_after_first_data' if canceled else 'success','durationMs':elapsed,'downstreamStatus':status,'eventsSHA256':hashlib.sha256(json.dumps(call,separators=(',',':')).encode()).hexdigest()},'events':call}
         output=Path('/recordings')/(protocol+'.json');output.write_text(json.dumps(fixture,indent=2)+'\n')
         records.append({'protocol':protocol,'observations':len(call),'durationMs':elapsed,'fixtureSHA256':hashlib.sha256(output.read_bytes()).hexdigest()})
     print(json.dumps({'realRecordings':records},indent=2))

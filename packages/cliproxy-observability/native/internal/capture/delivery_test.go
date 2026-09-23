@@ -73,7 +73,7 @@ func TestBatchRestartExactIdentityAndReceipt(t *testing.T) {
 			t.Error("missing dedicated auth")
 		}
 		call, _ := json.Marshal([]string{envelope.Destination, envelope.Instance, envelope.Boot, envelope.Request})
-		json.NewEncoder(w).Encode(map[string]any{"identity": b.Identity, "digest": b.Digest, "callId": Digest(call), "rawCommitted": true, "projectionCommitted": false})
+		json.NewEncoder(w).Encode(map[string]any{"identity": b.Identity, "digest": b.Digest, "callId": Digest(call), "rawCommitted": true, "projectionCommitted": false, "destinationId": d.ID, "deploymentId": d.Deployment})
 	}))
 	defer server.Close()
 	d.URL = server.URL + "/cliproxy/capture/v1"
@@ -199,7 +199,7 @@ func TestFairDeliveryAndContentFreeHealth(t *testing.T) {
 		json.Unmarshal(b, &env)
 		id, _ := json.Marshal([]any{dest, env.Instance, env.Boot, env.Request, env.First, env.Through})
 		call, _ := json.Marshal([]string{dest, env.Instance, env.Boot, env.Request})
-		json.NewEncoder(w).Encode(map[string]any{"identity": Digest(id), "digest": env.Digest, "callId": Digest(call), "rawCommitted": true})
+		json.NewEncoder(w).Encode(map[string]any{"identity": Digest(id), "digest": env.Digest, "callId": Digest(call), "rawCommitted": true, "destinationId": dest, "deploymentId": dest + "-deployment"})
 	}))
 	defer server.Close()
 	c := DeliveryConfig{}
@@ -209,7 +209,12 @@ func TestFairDeliveryAndContentFreeHealth(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := o.RunDelivery(ctx, c, server.Client())
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && (devCalls.Load() == 0 || prodCalls.Load() == 0) {
+	for time.Now().Before(deadline) {
+		var ready int
+		o.db.QueryRow("SELECT count(*) FROM batches WHERE (destination='dev' AND state='quarantined') OR (destination='prod' AND state='delivered')").Scan(&ready)
+		if ready == 2 {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
@@ -239,5 +244,36 @@ func TestOrphanRecovery(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("orphan not reconciled")
+	}
+}
+func TestDeliveryNeverFollowsRedirects(t *testing.T) {
+	o := deliveryOutbox(t)
+	var followed atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/cliproxy/capture/v1" {
+			w.Header().Set("Location", "/wrong-destination")
+			w.WriteHeader(302)
+			return
+		}
+		followed.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+	d := Destination{ID: "dev", Instance: "instance", Deployment: "dev-deployment", URL: server.URL + "/cliproxy/capture/v1", Token: "dedicated-delivery-secret"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := o.RunDelivery(ctx, DeliveryConfig{[]Destination{d}}, server.Client())
+	deadline := time.Now().Add(2 * time.Second)
+	var state string
+	for time.Now().Before(deadline) {
+		o.db.QueryRow("SELECT state FROM delivery_status WHERE destination='dev'").Scan(&state)
+		if state == "quarantined" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if followed.Load() != 0 || state != "quarantined" {
+		t.Fatal("redirect escaped pinned recipient or failed to quarantine")
 	}
 }

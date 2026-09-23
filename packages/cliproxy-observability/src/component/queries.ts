@@ -1,5 +1,34 @@
+import type { ModelCallV1 } from "../model-call/index.js";
 import { v } from "convex/values";
-import { query } from "./_generated/server.js";
+import { query, type QueryCtx } from "./_generated/server.js";
+async function summaryView(
+  ctx: QueryCtx,
+  row: {
+    summaryJson: string;
+    destinationId: string;
+    instanceId: string;
+    pluginBootId: string;
+    terminalSequence?: number;
+  },
+) {
+  const summary = JSON.parse(row.summaryJson) as ModelCallV1;
+  if (summary.state === "in_progress" && row.terminalSequence === undefined) {
+    const source = await ctx.db
+      .query("sourceStatus")
+      .withIndex("by_source", (q) =>
+        q.eq("destinationId", row.destinationId).eq("instanceId", row.instanceId),
+      )
+      .unique();
+    if (source?.healthJson && source.pluginBootId !== row.pluginBootId) {
+      summary.state = "unknown";
+      summary.capture.raw = "partial";
+      summary.capture.gaps = [...summary.capture.gaps, "completion_unobserved_prior_boot"].slice(
+        -8,
+      );
+    }
+  }
+  return summary;
+}
 const owner = { destinationId: v.string(), callId: v.string() };
 export const getCall = query({
   args: owner,
@@ -11,7 +40,11 @@ export const getCall = query({
       )
       .unique();
     if (!call) return null;
-    return { ...call, checkpointJson: undefined };
+    return {
+      ...call,
+      summaryJson: JSON.stringify(await summaryView(ctx, call)),
+      checkpointJson: undefined,
+    };
   },
 });
 export const getProcessingState = query({
@@ -156,17 +189,18 @@ export const pageRecentSummaries = query({
     }
     const rows = c ? await read("tie", limit + 1) : await read("first", limit + 1);
     if (c && rows.length < limit + 1) rows.push(...(await read("older", limit + 1 - rows.length)));
-    const calls: unknown[] = [];
+    const calls: ModelCallV1[] = [];
     let bytes = 256;
     let next = args.cursor;
     let consumed = 0;
     for (const row of rows.slice(0, limit)) {
+      const view = await summaryView(ctx, row);
       const summary = {
-        ...JSON.parse(row.summaryJson),
+        ...view,
         sourceDocumentId: row._id,
         receivedAt: row.receivedAt,
         capture: {
-          ...JSON.parse(row.summaryJson).capture,
+          ...view.capture,
           projectedThroughSequence: row.projectedThroughSequence,
           persistedThroughSequence: row.persistedThroughSequence,
         },
@@ -197,4 +231,18 @@ export const getCaptureCoverage = query({
       sourcesComplete: sources.length <= 16,
     };
   },
+});
+
+export const getBootHealth = query({
+  args: { destinationId: v.string(), instanceId: v.string(), pluginBootId: v.string() },
+  handler: async (ctx, args) =>
+    ctx.db
+      .query("bootHealth")
+      .withIndex("by_boot", (q) =>
+        q
+          .eq("destinationId", args.destinationId)
+          .eq("instanceId", args.instanceId)
+          .eq("pluginBootId", args.pluginBootId),
+      )
+      .unique(),
 });

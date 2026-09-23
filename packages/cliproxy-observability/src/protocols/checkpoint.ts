@@ -208,7 +208,7 @@ export function applyObservation(
     }
   }
   if (o.kind === "response" || o.kind === "stream_chunk" || o.kind === "completion") {
-    if (call.timeToFirstByteMs === undefined && body.length)
+    if (call.timeToFirstByteMs === undefined && (o.observedBodyBytes ?? body.length) > 0)
       call.timeToFirstByteMs = o.offsetNs / 1e6;
     try {
       if (o.kind === "response" && body.length) {
@@ -246,6 +246,12 @@ export function applyObservation(
     }
     delete state.sse;
     delete state.sseBlob;
+    if (
+      call.clientProtocol === "chat_completions" &&
+      state.chatFinished &&
+      o.completionOutcome === "succeeded"
+    )
+      state.terminal = "completed";
     call.completionOutcome = o.completionOutcome;
     call.executionStatusCode = o.executionStatusCode;
     call.endTimeUnixNano = nanoTime(o.executionCompletedAt);

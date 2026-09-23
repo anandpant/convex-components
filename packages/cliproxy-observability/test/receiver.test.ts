@@ -271,3 +271,51 @@ it("stores large pending SSE framing privately across projection revisions", asy
   });
   expect(JSON.parse(result!.summaryJson).capture.usage).toBe("complete");
 });
+it("authenticates content-free health and retains boot loss counters without regressing on delayed data", async () => {
+  const s = setup();
+  const first = events[0]!;
+  const handshake = await s.post({
+    schemaVersion: 1,
+    operation: "health",
+    destinationId: first.destinationId,
+    instanceId: first.instanceId,
+  });
+  expect(await handshake.json()).toMatchObject({ ready: true, deploymentId: "dev-deployment" });
+  expect(s.blobs.size).toBe(0);
+  await s.post(await envelope(events.slice(0, 2)));
+  const time = new Date(Date.parse(first.observedAt) + 60000).toISOString();
+  const health = {
+    schemaVersion: 1,
+    operation: "health_record",
+    destinationId: first.destinationId,
+    instanceId: first.instanceId,
+    pluginBootId: "new-boot",
+    startedAt: time,
+    observedAt: time,
+    observationsTotal: 10,
+    droppedObservationsTotal: 3,
+    lostControlObservationsTotal: 1,
+    scopeConflictsTotal: 0,
+    expiredScopesTotal: 0,
+    activeCalls: 1,
+    precommitCoverage: "unknown_before_local_commit",
+  };
+  expect((await s.post(health)).status).toBe(200);
+  await s.post(await envelope(events.slice(2, 3)));
+  const coverage = await s.backend.query(api.queries.getCaptureCoverage, {
+    destinationId: first.destinationId,
+  });
+  expect(coverage.sources[0]?.pluginBootId).toBe("new-boot");
+  expect(JSON.parse(coverage.sources[0]!.healthJson!)).toMatchObject({
+    counterScope: "plugin_boot",
+    lostControlObservationsTotal: 1,
+  });
+  const call = await s.backend.query(api.queries.getCall, {
+    destinationId: first.destinationId,
+    callId: await callIdentity(first),
+  });
+  expect(JSON.parse(call!.summaryJson)).toMatchObject({
+    state: "unknown",
+    capture: { gaps: ["completion_unobserved_prior_boot"] },
+  });
+});

@@ -87,7 +87,7 @@ func (d Destination) binding() string {
 	return Digest(b)
 }
 func (o *Outbox) initDelivery() error {
-	_, err := o.db.Exec(`CREATE TABLE IF NOT EXISTS delivery_bindings(destination TEXT PRIMARY KEY,binding TEXT NOT NULL); CREATE TABLE IF NOT EXISTS batches(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,path TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,first_sequence INTEGER NOT NULL,through_sequence INTEGER NOT NULL,bytes INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,last_status INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS segment_limits(destination TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,max_events INTEGER NOT NULL,PRIMARY KEY(destination,boot,request_id)); CREATE TABLE IF NOT EXISTS delivery_status(destination TEXT PRIMARY KEY,state TEXT NOT NULL,last_status INTEGER NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS batches_state ON batches(state); CREATE INDEX IF NOT EXISTS batches_pending ON batches(destination,state,next_attempt); CREATE INDEX IF NOT EXISTS events_pending ON events(destination,state,received_at); UPDATE batches SET state='pending' WHERE state='delivering';`)
+	_, err := o.db.Exec(`CREATE TABLE IF NOT EXISTS health(destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,observed_at INTEGER NOT NULL,payload BLOB NOT NULL,delivered_digest TEXT NOT NULL,dirty INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(destination,instance,boot)); CREATE INDEX IF NOT EXISTS health_pending ON health(destination,instance,observed_at); CREATE TABLE IF NOT EXISTS delivery_bindings(destination TEXT PRIMARY KEY,binding TEXT NOT NULL); CREATE TABLE IF NOT EXISTS batches(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,path TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,first_sequence INTEGER NOT NULL,through_sequence INTEGER NOT NULL,bytes INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,last_status INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS segment_limits(destination TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,max_events INTEGER NOT NULL,PRIMARY KEY(destination,boot,request_id)); CREATE TABLE IF NOT EXISTS delivery_status(destination TEXT PRIMARY KEY,state TEXT NOT NULL,last_status INTEGER NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS batches_state ON batches(state); CREATE INDEX IF NOT EXISTS batches_pending ON batches(destination,state,next_attempt); CREATE INDEX IF NOT EXISTS events_pending ON events(destination,state,received_at); UPDATE batches SET state='pending' WHERE state='delivering'; UPDATE delivery_status SET state='unavailable',reason='destination_not_active_after_restart';`)
 	if err != nil {
 		return err
 	}
@@ -131,10 +131,17 @@ func (o *Outbox) initDelivery() error {
 // RunDelivery has one owner per destination. A paused or retrying receiver cannot block another.
 func (o *Outbox) RunDelivery(ctx context.Context, c DeliveryConfig, client *http.Client) <-chan struct{} {
 	done := make(chan struct{})
+	o.destinationBudgets = map[string]int64{}
+	for _, d := range c.Destinations {
+		o.destinationBudgets[d.ID] = o.budget / int64(max(1, len(c.Destinations))) / 2
+	}
 	var wg sync.WaitGroup
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
+	copyClient := *client
+	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &copyClient
 	for _, d := range c.Destinations {
 		wg.Add(1)
 		go func() { defer wg.Done(); o.deliverDestination(ctx, d, client) }()
@@ -156,14 +163,14 @@ func (o *Outbox) bindDestination(d Destination) error {
 	}
 	return nil
 }
-func (o *Outbox) health(ctx context.Context, d Destination, client *http.Client) bool {
+func (o *Outbox) health(ctx context.Context, d Destination, client *http.Client) (int, bool) {
 	raw, _ := json.Marshal(map[string]any{"schemaVersion": 1, "operation": "health", "destinationId": d.ID, "instanceId": d.Instance})
 	req, _ := http.NewRequestWithContext(ctx, "POST", d.URL, bytes.NewReader(raw))
 	req.Header.Set("Authorization", "Bearer "+d.Token)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	defer res.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(res.Body, 4097))
@@ -173,7 +180,12 @@ func (o *Outbox) health(ctx context.Context, d Destination, client *http.Client)
 		Instance    string `json:"instanceId"`
 		Ready       bool   `json:"ready"`
 	}
-	return err == nil && len(b) <= 4096 && res.StatusCode == 200 && json.Unmarshal(b, &health) == nil && health.Ready && health.Destination == d.ID && health.Deployment == d.Deployment && health.Instance == d.Instance
+	ok := err == nil && len(b) <= 4096 && res.StatusCode == 200 && json.Unmarshal(b, &health) == nil && health.Ready && health.Destination == d.ID && health.Deployment == d.Deployment && health.Instance == d.Instance
+	status := res.StatusCode
+	if status == 200 && !ok {
+		status = 409
+	}
+	return status, ok
 }
 func (o *Outbox) deliverDestination(ctx context.Context, d Destination, client *http.Client) {
 	if o.bindDestination(d) != nil {
@@ -181,10 +193,28 @@ func (o *Outbox) deliverDestination(ctx context.Context, d Destination, client *
 		return
 	}
 	// A deployment-authenticated, content-free check precedes every daemon boot's delivery.
-	for !o.health(ctx, d, client) {
-		o.setDeliveryStatus(d.ID, "unavailable", 0, "health_auth_or_identity_failed")
-		if !pause(ctx, 30*time.Second) {
-			return
+	for attempts := 0; ; attempts++ {
+		status, ready := o.health(ctx, d, client)
+		if ready {
+			break
+		}
+		if status != 0 && status != 408 && status != 429 && status < 500 {
+			o.setDeliveryStatus(d.ID, "quarantined", status, "health_auth_or_identity_failed")
+			for {
+				if !pause(ctx, time.Second) {
+					return
+				}
+				var state string
+				o.db.QueryRow("SELECT state FROM delivery_status WHERE destination=?", d.ID).Scan(&state)
+				if state != "quarantined" {
+					break
+				}
+			}
+		} else {
+			o.setDeliveryStatus(d.ID, "unavailable", status, "health_unavailable")
+			if !pause(ctx, min(5*time.Minute, time.Second*time.Duration(1<<min(attempts+1, 8)))) {
+				return
+			}
 		}
 	}
 	var quarantined int
@@ -194,6 +224,7 @@ func (o *Outbox) deliverDestination(ctx context.Context, d Destination, client *
 	} else {
 		o.setDeliveryStatus(d.ID, "pending", 0, "ready")
 	}
+	lastHealth := time.Time{}
 	for ctx.Err() == nil {
 		var state string
 		_ = o.db.QueryRow("SELECT state FROM delivery_status WHERE destination=?", d.ID).Scan(&state)
@@ -202,6 +233,14 @@ func (o *Outbox) deliverDestination(ctx context.Context, d Destination, client *
 				return
 			}
 			continue
+		}
+		if time.Since(lastHealth) >= 2*time.Second {
+			o.sendHealth(ctx, d, client)
+			lastHealth = time.Now()
+			o.db.QueryRow("SELECT state FROM delivery_status WHERE destination=?", d.ID).Scan(&state)
+			if state == "quarantined" {
+				continue
+			}
 		}
 		batch, err := o.nextBatch(d)
 		if err != nil || batch == nil {
@@ -390,11 +429,12 @@ func (o *Outbox) sendBatch(ctx context.Context, d Destination, b deliveryBatch, 
 	defer res.Body.Close()
 	ackRaw, err := io.ReadAll(io.LimitReader(res.Body, 4097))
 	var ack struct {
-		Identity, Digest, CallID string
-		RawCommitted             bool
+		Identity, Digest, CallID    string
+		DestinationID, DeploymentID string
+		RawCommitted                bool
 	}
 	callRaw, _ := json.Marshal([]string{b.Destination, b.Instance, b.Boot, b.Request})
-	accepted := err == nil && len(ackRaw) <= 4096 && res.StatusCode == 200 && json.Unmarshal(ackRaw, &ack) == nil && ack.Identity == b.Identity && ack.Digest == b.Digest && ack.CallID == Digest(callRaw) && ack.RawCommitted
+	accepted := err == nil && len(ackRaw) <= 4096 && res.StatusCode == 200 && json.Unmarshal(ackRaw, &ack) == nil && ack.Identity == b.Identity && ack.Digest == b.Digest && ack.CallID == Digest(callRaw) && ack.RawCommitted && ack.DestinationID == d.ID && ack.DeploymentID == d.Deployment
 	status := res.StatusCode
 	if status == 200 && !accepted {
 		status = 409
@@ -420,6 +460,8 @@ func (o *Outbox) ackBatch(b deliveryBatch) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	_, _ = o.db.Exec("PRAGMA incremental_vacuum(256)")
+	_, _ = o.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return os.Remove(b.Path)
 }
 

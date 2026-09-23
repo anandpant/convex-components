@@ -8,16 +8,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type Outbox struct {
-	db      *sql.DB
-	path    string
-	reserve uint64
-	budget  int64
+	db                 *sql.DB
+	path               string
+	reserve            uint64
+	budget             int64
+	destinationBudgets map[string]int64
 }
 
 func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
@@ -40,6 +42,10 @@ func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	if _, err = db.Exec("PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	o := &Outbox{db: db, path: path, reserve: reserve, budget: maxBytes}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,payload BLOB NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,state TEXT NOT NULL DEFAULT 'pending'); CREATE INDEX IF NOT EXISTS events_call ON events(destination,instance,boot,request_id,sequence);`)
 	if err == nil {
@@ -66,6 +72,10 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"delivery": o.deliveryStatus(), "durableEvents": count, "payloadBytes": bytes, "remoteDelivery": "durable_batches", "retention": "indefinite", "precommitCoverage": "unknown"})
+		return
+	}
+	if r.Method == "POST" && r.URL.Path == "/health" {
+		o.admitHealth(w, r)
 		return
 	}
 	if r.Method == "POST" && r.URL.Path == "/resume" {
@@ -117,6 +127,18 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if err == sql.ErrNoRows {
+		if limit, ok := o.destinationBudgets[event.Destination]; ok && !(len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_")) {
+			var pending int64
+			if tx.QueryRow("SELECT coalesce(sum(length(payload)),0) FROM events WHERE destination=? AND state='pending'", event.Destination).Scan(&pending) != nil || pending+int64(len(raw)) > limit {
+				http.Error(w, "destination outbox budget", 507)
+				return
+			}
+		}
+		var pages, freePages int64
+		if !(len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_")) && (tx.QueryRow("PRAGMA page_count").Scan(&pages) != nil || tx.QueryRow("PRAGMA freelist_count").Scan(&freePages) != nil || (pages-freePages)*4096+int64(len(raw)*2) > o.budget-min(o.budget/8, 1<<20)) {
+			http.Error(w, "reserved control capacity", 507)
+			return
+		}
 		var stat syscall.Statfs_t
 		if syscall.Statfs(filepath.Dir(o.path), &stat) != nil || uint64(stat.Bavail)*uint64(stat.Bsize) < o.reserve+uint64(len(raw)*4) {
 			http.Error(w, "disk reserve", 507)

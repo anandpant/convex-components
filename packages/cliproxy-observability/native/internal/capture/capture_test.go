@@ -151,3 +151,58 @@ func TestRedactionDepthFailureWithholdsOriginal(t *testing.T) {
 		t.Fatal("secret object key persisted")
 	}
 }
+func TestSemanticCredentialFragmentsNeverPersist(t *testing.T) {
+	for split := 1; split < len("secret-value"); split++ {
+		r := FrameRedactor{}
+		var all []byte
+		for index, part := range []string{"secret-value"[:split], "secret-value"[split:]} {
+			payload, _ := json.Marshal(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": part}})
+			body := append([]byte("data: "), payload...)
+			body = append(body, '\n', '\n')
+			out, _, gap := r.Feed(body, uint64(index+1), true, index == 1, []string{"secret-value"})
+			if gap != "" {
+				t.Fatal(gap)
+			}
+			if index == 0 && len(out) != 0 {
+				t.Fatal("ambiguous prefix released")
+			}
+			all = append(all, out...)
+		}
+		if strings.Contains(string(all), "secret-value") || !strings.Contains(string(all), "[REDACTED]") {
+			t.Fatal("fragment redaction failed")
+		}
+	}
+	r := FrameRedactor{}
+	var all []byte
+	for index, part := range []string{`{"api_`, `key":"not-in-known-set"}`} {
+		payload, _ := json.Marshal(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "input_json_delta", "partial_json": part}})
+		body := append([]byte("data: "), payload...)
+		body = append(body, '\n', '\n')
+		out, _, gap := r.Feed(body, uint64(index+1), true, index == 1, nil)
+		if gap != "" {
+			t.Fatal(gap)
+		}
+		all = append(all, out...)
+	}
+	if strings.Contains(string(all), "not-in-known-set") || !strings.Contains(string(all), "[REDACTED]") {
+		t.Fatal("serialized JSON credential fragments leaked")
+	}
+}
+func TestStockOpenAIJSONChunks(t *testing.T) {
+	r := FrameRedactor{allowJSON: true}
+	out, from, gap := r.Feed([]byte(`{"id":"stock","choices":[{"index":0,"delta":{"content":"CAPTURE_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`), 3, true, false, nil)
+	if gap != "" || from == nil || *from != 3 || !bytes.HasPrefix(out, []byte("data: {")) || !bytes.HasSuffix(out, []byte("\n\n")) {
+		t.Fatal("stock pre-framer JSON chunk lost")
+	}
+	tail, _, gap := r.Feed(nil, 4, true, true, nil)
+	if len(tail) != 0 || gap != "" {
+		t.Fatal("complete raw JSON chunk reported truncated")
+	}
+}
+func TestRedactedCorrelationsCannotCreateFalseJoins(t *testing.T) {
+	o := Observation{Model: "model-secret", TraceID: "trace-secret", Correlation: map[string]string{"runId": "run-secret", "requestId": "exact-request"}}
+	redactMetadata(&o, []string{"secret"})
+	if o.TraceID != "" || o.Correlation["runId"] != "" || o.Correlation["requestId"] != "exact-request" || len(o.CorrelationConflicts) != 2 {
+		t.Fatal("redaction fabricated an indexed correlation")
+	}
+}

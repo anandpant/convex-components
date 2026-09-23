@@ -92,7 +92,7 @@ export function projectCapturedPayloads(args: {
       projection.protocol === "responses"
         ? assembleResponsesStream(events)
         : projection.protocol === "chat_completions"
-          ? assembleChatStream(events, done)
+          ? assembleChatStream(events, done, args.complete === true)
           : assembleAnthropicStream(events);
     response = assembled.response;
     invalid ||= assembled.invalid;

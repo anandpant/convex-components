@@ -10,34 +10,43 @@ const recording = (name: string) =>
       events: CaptureObservationV1[];
     }
   ).events;
-it.each(["messages-sse", "responses-sse", "chat-json"])(
-  "replays real %s through summary and full content parsers",
-  async (name) => {
-    const events = recording(name);
-    const first = events[0]!;
-    const call = initialCall(first, await callIdentity(first), 1);
-    const state: ProjectionCheckpoint = {};
-    for (const event of events) applyObservation(call, state, event);
-    expect(call.state).toBe("succeeded");
-    expect(call.providerName).toBeUndefined();
-    expect(call.cost).toEqual({ kind: "unknown" });
-    expect(call.capture.raw).toBe("complete");
-    expect(call.capture.projectedThroughSequence).toBe(events.length);
-    expect(call.usage.length).toBeGreaterThan(0);
-    const projection = projectCapturedPayloads({
-      route: first.route,
-      request: decodeBody(first),
-      response: events.find((e) => e.kind === "response")
-        ? decodeBody(events.find((e) => e.kind === "response")!)
-        : undefined,
-      chunks: name.endsWith("sse")
-        ? events.filter((e) => e.kind === "stream_chunk").map(decodeBody)
-        : undefined,
-    });
-    expect(projection.responseState).toBe("decoded");
-    expect(projection.output?.completion).toBe("CAPTURE_OK");
-  },
-);
+it.each([
+  "messages-sse",
+  "responses-sse",
+  "chat-json",
+  "messages-json",
+  "responses-json",
+  "chat-sse",
+])("replays real %s through summary and full content parsers", async (name) => {
+  const events = recording(name);
+  const first = events[0]!;
+  const call = initialCall(first, await callIdentity(first), 1);
+  const state: ProjectionCheckpoint = {};
+  for (const event of events) applyObservation(call, state, event);
+  expect(call.state).toBe("succeeded");
+  expect(call.providerName).toBeUndefined();
+  expect(call.cost).toEqual({ kind: "unknown" });
+  expect(call.capture.raw).toBe("complete");
+  expect(call.capture.projectedThroughSequence).toBe(events.length);
+  expect(call.usage.length).toBeGreaterThan(0);
+  const projection = projectCapturedPayloads({
+    route: first.route,
+    complete: true,
+    request: decodeBody(first),
+    response: events.find((e) => e.kind === "response")
+      ? decodeBody(events.find((e) => e.kind === "response")!)
+      : undefined,
+    chunks: name.endsWith("sse")
+      ? events
+          .filter(
+            (e) => (e.kind === "stream_chunk" || e.kind === "completion") && e.contentBytes > 0,
+          )
+          .map(decodeBody)
+      : undefined,
+  });
+  expect(projection.responseState).toBe("decoded");
+  expect(projection.output?.completion).toBe("CAPTURE_OK");
+});
 it("preserves partial usage without promoting aborted Messages counters", async () => {
   const events = recording("messages-sse").filter((e) => e.kind !== "completion");
   const terminal = events.findIndex(
@@ -86,4 +95,17 @@ it("checkpoints an SSE frame split across observations without invalidating usag
   expect(call.capture.projection).toBe("complete");
   expect(call.capture.usage).toBe("complete");
   expect(call.outputTokens).toBeGreaterThan(0);
+});
+
+it("retains a real canceled stream as an aborted call with partial usage", async () => {
+  const events = recording("messages-abort");
+  const call = initialCall(events[0]!, await callIdentity(events[0]!), 1);
+  const state: ProjectionCheckpoint = {};
+  for (const event of events) applyObservation(call, state, event);
+  expect(call.state).toBe("aborted");
+  expect(call.completionOutcome).toBe("canceled");
+  expect(call.inputTokens).toBeUndefined();
+  expect(call.outputTokens).toBeUndefined();
+  expect(call.usage.every((u) => u.finality === "partial")).toBe(true);
+  expect(call.capture.usage).toBe("partial");
 });

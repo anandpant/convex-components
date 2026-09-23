@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.1
+
+- Include the receiver-bound destination and deployment IDs in segment admission and duplicate ACKs so the native exporter can verify its delivery target.
+
+## 0.1.0
 
 - Stock CLIProxy native capture proof and private Convex component.
 - Immutable batched raw admission, exact receipts, bounded queries and separate projection progress.

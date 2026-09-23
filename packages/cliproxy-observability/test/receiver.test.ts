@@ -91,9 +91,25 @@ it.each([
 it("commits raw independently, deduplicates exact retries, and projects from owned blobs", async () => {
   const s = setup();
   const body = await envelope();
-  expect((await s.post(body)).status).toBe(200);
+  const first = await s.post(body);
+  expect(first.status).toBe(200);
+  const firstAck = await first.json();
+  expect(firstAck).toMatchObject({
+    destinationId: s.options.destinationId,
+    deploymentId: s.options.deploymentId,
+    callId: await callIdentity(events[0]!),
+    duplicate: false,
+    rawCommitted: true,
+    projectionCommitted: false,
+  });
   const duplicate = await s.post(body);
-  expect(await duplicate.json()).toMatchObject({
+  const duplicateAck = await duplicate.json();
+  expect(duplicateAck).toMatchObject({
+    destinationId: s.options.destinationId,
+    deploymentId: s.options.deploymentId,
+    identity: firstAck.identity,
+    digest: firstAck.digest,
+    callId: firstAck.callId,
     duplicate: true,
     rawCommitted: true,
     projectionCommitted: false,

@@ -266,7 +266,13 @@ export async function handleCliproxyCaptureRequest(
     });
     // Scheduling failure returns retryable 503 after durable receipt; retry is idempotent.
     await options.scheduleProjection(ctx, callId);
-    return Response.json({ ...receipt, rawCommitted: true, projectionCommitted: false });
+    return Response.json({
+      ...receipt,
+      destinationId: options.destinationId,
+      deploymentId: options.deploymentId,
+      rawCommitted: true,
+      projectionCommitted: false,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     return new Response(

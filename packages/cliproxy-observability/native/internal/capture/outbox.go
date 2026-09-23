@@ -46,6 +46,29 @@ func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
 		db.Close()
 		return nil, err
 	}
+	// SQLite ignores auto_vacuum on an existing NONE database until VACUUM.
+	// Perform this once, before admission starts; preserve all unacknowledged rows.
+	var vacuumMode int
+	if err = db.QueryRow("PRAGMA auto_vacuum").Scan(&vacuumMode); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if vacuumMode != 2 {
+		var pages, pageSize uint64
+		var fs syscall.Statfs_t
+		if db.QueryRow("PRAGMA page_count").Scan(&pages) != nil || db.QueryRow("PRAGMA page_size").Scan(&pageSize) != nil || syscall.Statfs(filepath.Dir(path), &fs) != nil || uint64(fs.Bavail)*uint64(fs.Bsize) < reserve+pages*pageSize*2 {
+			db.Close()
+			return nil, errors.New("insufficient disk reserve for outbox vacuum migration")
+		}
+		if _, err = db.Exec("VACUUM"); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if err = db.QueryRow("PRAGMA auto_vacuum").Scan(&vacuumMode); err != nil || vacuumMode != 2 {
+			db.Close()
+			return nil, errors.New("outbox vacuum migration did not enable incremental reclamation")
+		}
+	}
 	o := &Outbox{db: db, path: path, reserve: reserve, budget: maxBytes}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,payload BLOB NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,state TEXT NOT NULL DEFAULT 'pending'); CREATE INDEX IF NOT EXISTS events_call ON events(destination,instance,boot,request_id,sequence);`)
 	if err == nil {

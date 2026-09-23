@@ -497,7 +497,8 @@ func (o *Outbox) segmentCapacity(tx *sql.Tx, extra int64) bool {
 		}
 	}
 	var fs syscall.Statfs_t
-	return total+(8<<20) <= o.budget && syscall.Statfs(filepath.Dir(o.path), &fs) == nil && uint64(fs.Bavail)*uint64(fs.Bsize) > o.reserve+uint64(extra)+(8<<20)
+	headroom := min(o.budget/8, 8<<20)
+	return total+headroom <= o.budget && syscall.Statfs(filepath.Dir(o.path), &fs) == nil && uint64(fs.Bavail)*uint64(fs.Bsize) > o.reserve+uint64(extra)+uint64(headroom)
 }
 func (o *Outbox) reconcileSegments(dir string) error {
 	handle, err := os.Open(dir)

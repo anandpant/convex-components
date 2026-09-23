@@ -3,6 +3,7 @@ package capture
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -275,5 +276,54 @@ func TestDeliveryNeverFollowsRedirects(t *testing.T) {
 	<-done
 	if followed.Load() != 0 || state != "quarantined" {
 		t.Fatal("redirect escaped pinned recipient or failed to quarantine")
+	}
+}
+
+func TestLegacyOutboxMigratesAndReclaimsPayloadPages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "events.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	old, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = old.Exec("CREATE TABLE legacy_payload (id INTEGER PRIMARY KEY,payload BLOB); INSERT INTO legacy_payload VALUES (1,zeroblob(1048576));"); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+	o, err := OpenOutbox(path, 64<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	var size, mode, before, after int
+	o.db.QueryRow("SELECT length(payload) FROM legacy_payload WHERE id=1").Scan(&size)
+	o.db.QueryRow("PRAGMA auto_vacuum").Scan(&mode)
+	if size != 1048576 || mode != 2 {
+		t.Fatalf("migration lost data or did not enable incremental vacuum: size=%d mode=%d", size, mode)
+	}
+	o.db.QueryRow("PRAGMA page_count").Scan(&before)
+	if _, err = o.db.Exec("DELETE FROM legacy_payload; PRAGMA incremental_vacuum"); err != nil {
+		t.Fatal(err)
+	}
+	o.db.QueryRow("PRAGMA page_count").Scan(&after)
+	if after >= before {
+		t.Fatalf("payload pages not reclaimed: %d -> %d", before, after)
+	}
+}
+func TestMinimumOutboxBudgetCanDeliver(t *testing.T) {
+	o, err := OpenOutbox(filepath.Join(t.TempDir(), "private", "events.db"), 4<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	admitTestEvent(t, o, "dev", 1)
+	b, err := o.nextBatch(Destination{ID: "dev", Instance: "instance"})
+	if err != nil || b == nil {
+		t.Fatalf("accepted minimum budget cannot deliver: %v", err)
+	}
+	if err := o.ackBatch(*b); err != nil {
+		t.Fatal(err)
 	}
 }

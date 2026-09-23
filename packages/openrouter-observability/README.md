@@ -93,9 +93,13 @@ The host routes are:
 | `GET`  | `/health` | Return `ok`       |
 
 `RETENTION_DAYS` is optional and defaults to 30. It accepts integer strings from 1 through 3650. A daily job deletes expired spans in indexed batches.
+
+Set `RETENTION_DAYS: "indefinite"` in the component's `env` configuration to keep spans and their deduplication keys indefinitely. The daily maintenance job does not schedule expired-span deletion, and cleanup continuations queued before the configuration change delete nothing and stop. Migrations and correlation backfills continue, including removal of legacy raw-delivery rows.
+
 Invalid retention configuration makes the cleanup job fail. Treat that as an operational configuration error and alert on failed Convex cron runs. `/health` is only a liveness route and does not report retention readiness.
 
 Configure object-store lifecycle deletion on the dedicated trace prefix. For a 30-day component retention period, 35 days is a practical blob lifetime: full spans disappear first, then the store removes their objects and any uploads orphaned by a failed Convex mutation. The adapter intentionally has no delete or reference-count contract.
+For indefinite retention, disable lifecycle expiration on retained trace blobs as well; `RETENTION_DAYS` does not change the host's object-store configuration.
 
 The initial release also performs a bounded, idempotent migration for deployments upgrading from
 the former Prismantix-local component: it adds compact deduplication keys, fills the newly separated

@@ -1,0 +1,64 @@
+{
+  "fixtureProvenance": "simulated_provider_playback",
+  "stockVersion": "7.3.5",
+  "stockSHA256": "79766341173c68f9df506fdb9d0b3e1277a7adc58c925812ca0bcc0ecd7af30f",
+  "architecture": "aarch64",
+  "load": {
+    "concurrency": 8,
+    "calls": 160,
+    "requestContentBytes": 65536
+  },
+  "baseline": {
+    "ttfbMs": {
+      "p50": 56.500652,
+      "p95": 67.179786,
+      "p99": 82.775087
+    },
+    "latencyMs": {
+      "p50": 56.749821,
+      "p95": 67.230162,
+      "p99": 82.783837
+    },
+    "callsPerSecond": 141.29485310707648,
+    "peakRssKiB": {
+      "stock": 60848,
+      "exporter": 9316
+    }
+  },
+  "baselineAuthorityPositiveControl": true,
+  "enabled": {
+    "ttfbMs": {
+      "p50": 91.35166,
+      "p95": 136.474423,
+      "p99": 153.052067
+    },
+    "latencyMs": {
+      "p50": 92.228585,
+      "p95": 142.246848,
+      "p99": 156.667848
+    },
+    "callsPerSecond": 84.96370586877285,
+    "peakRssKiB": {
+      "stock": 85932,
+      "exporter": 18032
+    }
+  },
+  "protocolProof": {
+    "/v1/messages": {
+      "status": 200,
+      "downstreamSHA256": "2638123792c94085c3458fdf9119c374a8ef640ae0fb10753d5e1b6573186845"
+    },
+    "/v1/responses": {
+      "status": 200,
+      "downstreamSHA256": "fc1805c3634654c4610b7518e8076970c48fa4b48285d9c660997b0f8119dd7f"
+    },
+    "/v1/chat/completions": {
+      "status": 200,
+      "downstreamSHA256": "bec9f6af8f135205cbe36e75f88beb260108f0f9357318a8ab65bc210fbc6aa8"
+    }
+  },
+  "durableEventsBeforeRestart": 1010,
+  "collectorUnavailableInferenceMs": 1.414596103131771,
+  "durability": "restart + collector unavailable replay passed",
+  "scope": "personal/preview/case/conflict/missing deployment/device spoof excluded; gateway overwrite and both carriers passed"
+}

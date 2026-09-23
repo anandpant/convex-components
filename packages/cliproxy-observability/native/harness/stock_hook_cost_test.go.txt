@@ -1,0 +1,44 @@
+// This test is copied into the pinned upstream source solely for measurement.
+// It does not modify or build a replacement serving binary.
+package pluginhost
+
+import (
+ "bytes"
+ "context"
+ "encoding/json"
+ "fmt"
+ "net/http"
+ "os"
+ "sort"
+ "strings"
+ "sync"
+ "testing"
+ "time"
+
+ "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+ "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+)
+func TestCaptureStockHookCost(t *testing.T){
+ host:=New()
+ client,err:=defaultPluginLoader().Open(pluginFile{ID:"cliproxy-capture",Path:"/capture/cliproxy-capture.so"},host);if err!=nil{t.Fatal(err)}
+ plugin,err:=registerRPCPlugin(context.Background(),host,"cliproxy-capture",client,pluginabi.MethodPluginRegister,nil);if err!=nil{t.Fatal(err)}
+ host=newHostWithRecords(capabilityRecord{id:"cliproxy-capture",plugin:plugin})
+ payload:=[]byte(`{"messages":[{"role":"user","content":"`+strings.Repeat("x",65536)+`"}]}`)
+ headers:=http.Header{"Authorization":{"Bearer harness-Dev-key-0123456789"},"X-Meshix-Capture-Destination":{"harness-dev"},"X-Meshix-Capture-Route":{"POST /v1/chat/completions"},"X-Meshix-Capture-Revision":{"proof-v1"},"X-Meshix-Deployment":{"https://harness-dev.convex.site"}}
+ var mu sync.Mutex;times:=[]float64{};var wg sync.WaitGroup
+ for worker:=0;worker<8;worker++{wg.Add(1);go func(worker int){defer wg.Done();for i:=0;i<25;i++{
+  id:=fmt.Sprintf("hook-cost-%d-%d",worker,i)
+  start:=time.Now()
+  // Include the before-handler's clones, host fan-out clones, actual native JSON RPC,
+  // and handler final-header/body copies. No provider network or disk wait here.
+  result:=host.InterceptRequestBeforeAuth(context.Background(),pluginapi.RequestInterceptRequest{RequestID:id,SourceFormat:"openai",RequestedModel:"proof-model",Model:"proof-model",Headers:headers.Clone(),Body:bytes.Clone(payload)})
+  _=result.Headers.Clone();_=bytes.Clone(result.Body)
+  elapsed:=float64(time.Since(start).Nanoseconds())/1e6
+  mu.Lock();times=append(times,elapsed);mu.Unlock()
+  if result.Headers.Get("X-Meshix-Capture-Destination")!=""{t.Error("authority removal failed")}
+  plugin.Capabilities.RequestLifecyclePlugin.HandleRequestComplete(context.Background(),pluginapi.RequestCompletion{RequestID:id,Outcome:pluginapi.RequestCompletionSucceeded,StatusCode:200})
+ }}(worker)}
+ wg.Wait();sort.Float64s(times)
+ report:=map[string]any{"measurement":"pinned upstream host + actual native plugin; not a serving binary","samples":len(times),"concurrency":8,"requestBytes":len(payload),"callbackMs":map[string]float64{"p50":times[len(times)/2],"p95":times[len(times)*95/100],"p99":times[len(times)*99/100]}}
+ raw,_:=json.MarshalIndent(report,"","  ");fmt.Println(string(raw));if path:=os.Getenv("CAPTURE_BENCH_REPORT");path!=""{if err:=os.WriteFile(path,raw,0600);err!=nil{t.Fatal(err)}}
+}

@@ -6,3 +6,5 @@ coverage/
 *.tgz
 .pack/
 .env.local
+
+.memory/

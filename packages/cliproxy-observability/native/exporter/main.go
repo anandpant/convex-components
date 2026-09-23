@@ -1,4 +1,4 @@
-// cliproxy-capture-exporter slice 1: private UDS durable admission, no remote delivery yet.
+// cliproxy-capture-exporter: private durable admission and independently scoped delivery.
 package main
 
 import (
@@ -20,13 +20,22 @@ func main() {
 	db := flag.String("db", "", "private outbox path")
 	budget := flag.Int64("budget-bytes", 2<<30, "outbox database ceiling")
 	reserve := flag.Uint64("reserve-bytes", 2<<30, "minimum filesystem free space")
+	delivery := flag.String("delivery-config", "", "private destination credential bundle; empty disables remote delivery")
 	flag.Parse()
-	if err := run(*socket, *db, *budget, *reserve); err != nil {
+	if err := run(*socket, *db, *budget, *reserve, *delivery); err != nil {
 		fmt.Fprintln(os.Stderr, "capture exporter stopped:", err)
 		os.Exit(1)
 	}
 }
-func run(socket, db string, budget int64, reserve uint64) error {
+func run(socket, db string, budget int64, reserve uint64, deliveryPath string) error {
+	var delivery capture.DeliveryConfig
+	if deliveryPath != "" {
+		var err error
+		delivery, err = capture.LoadDeliveryConfig(deliveryPath)
+		if err != nil {
+			return err
+		}
+	}
 	if !filepath.IsAbs(socket) {
 		return fmt.Errorf("absolute socket required")
 	}
@@ -70,6 +79,8 @@ func run(socket, db string, budget int64, reserve uint64) error {
 	server := &http.Server{Handler: outbox, ReadHeaderTimeout: time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	delivered := outbox.RunDelivery(ctx, delivery, nil)
+	defer func() { stop(); <-delivered }()
 	go func() {
 		<-ctx.Done()
 		deadline, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -1,7 +1,6 @@
 # Protocol recordings
 
-`real/` contains plugin-produced, sanitized observations from three harmless dev
-protocol calls on September 23, 2026 UTC. The isolated official CLIProxy 7.3.5
+`real/` contains plugin-produced, sanitized observations from six harmless dev protocol variants and one real cancellation on September 23, 2026 UTC. The isolated official CLIProxy 7.3.5
 ARM64 process used the existing private Meshix dev gateway as its configured
 OpenAI-compatible upstream. The existing gateway retained ownership of OAuth
 state. These are real provider responses, with an extra gateway explicitly
@@ -19,8 +18,7 @@ prior user content were exported. Only the minimal fixture prompt was submitted.
 explicitly invoked with private dev credentials and is never run in CI. Two earlier
 successful Messages calls failed the recorder's initial token-boundary assertion,
 and one attempt returned HTTP 502; those are not promoted as successful fixtures.
-The three checked-in recordings came from the final bounded invocation.
+The initial three recordings came from the final bounded slice-1 invocation. Slice 3 adds Messages JSON, Responses JSON, Chat SSE and a real Messages cancellation. One earlier Chat SSE call succeeded at inference but exposed an uncaptured stock JSON-chunk framing path; that incomplete recording was not promoted. The pinned-source framing fix and replay regression passed before the successful Chat recording. Each fixture keeps its own actual plugin hash and redaction version.
 
 Synthetic provider playback in `native/harness/proof.py` is separate from these
-recordings. Derived abort, split-frame and malformed fixtures must identify the
-original fixture and transformation; do not label them as real abort recordings.
+recordings. Derived split-frame and malformed cases identify their source fixture/transformation in tests. `messages-abort.json` is the separately recorded real client cancellation, not a synthetic truncation.

@@ -10,7 +10,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "pack:check": "pnpm --filter \"@shpitdev/convex-*-observability\" pack:check",
-    "release:test": "node --test scripts/check-release-tag.test.mjs",
+    "release:test": "node --test scripts/check-release-tag.test.mjs scripts/publish-package.test.mjs",
     "test": "pnpm --filter \"@shpitdev/convex-*-observability\" test",
     "typecheck": "pnpm --filter \"@shpitdev/convex-*-observability\" typecheck"
   },

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   publish:
-    if: startsWith(github.event.release.tag_name, 'openrouter-observability-v')
+    if: startsWith(github.event.release.tag_name, 'openrouter-observability-v') || startsWith(github.event.release.tag_name, 'cliproxy-observability-v')
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -27,9 +27,38 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - name: Verify release tag matches package version
+        id: package
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: node scripts/check-release-tag.mjs
       - name: Publish
-        working-directory: packages/openrouter-observability
-        run: npm publish --provenance
+        working-directory: ${{ steps.package.outputs.package-directory }}
+        run: node ../../scripts/publish-package.mjs
+
+  native-artifacts:
+    if: startsWith(github.event.release.tag_name, 'cliproxy-observability-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Verify version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/check-release-tag.mjs
+      - name: Build and prove stock compatibility
+        run: |
+          docker build -t cliproxy-capture-proof -f packages/cliproxy-observability/native/harness/Dockerfile packages/cliproxy-observability/native
+          docker run --rm --cpus 2 --memory 4g cliproxy-capture-proof
+      - name: Package checksummed Linux artifacts
+        run: packages/cliproxy-observability/native/harness/package-artifacts.sh cliproxy-capture-proof .memory/native-artifacts
+      - name: Attach immutable release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" .memory/native-artifacts/*.tar.gz .memory/native-artifacts/SHA256SUMS

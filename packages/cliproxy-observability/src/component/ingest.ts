@@ -176,9 +176,11 @@ export const admit = mutation({
       lastObservedAt: args.observedAt,
       lastReceivedAt: now,
       coverage: "precommit_and_pre_hook_unavailable",
+      healthJson: status?.pluginBootId === args.pluginBootId ? status.healthJson : undefined,
     };
-    if (status) await ctx.db.patch("sourceStatus", status._id, health);
-    else await ctx.db.insert("sourceStatus", health);
+    if (status && Date.parse(status.lastObservedAt) <= Date.parse(args.observedAt))
+      await ctx.db.patch("sourceStatus", status._id, health);
+    else if (!status) await ctx.db.insert("sourceStatus", health);
     return { identity: args.identity, digest: args.digest, callId: args.callId, duplicate: false };
   },
 });
@@ -248,5 +250,79 @@ export const recordProjectionFailure = mutation({
       await ctx.db.patch("calls", call._id, {
         projectionFailure: { reason: "projection_processing_failed", at: Date.now() },
       });
+  },
+});
+
+export const recordHealth = mutation({
+  args: {
+    destinationId: v.string(),
+    instanceId: v.string(),
+    pluginBootId: v.string(),
+    startedAt: v.string(),
+    observedAt: v.string(),
+    observationsTotal: v.number(),
+    droppedObservationsTotal: v.number(),
+    lostControlObservationsTotal: v.number(),
+    scopeConflictsTotal: v.number(),
+    expiredScopesTotal: v.number(),
+    activeCalls: v.number(),
+  },
+  handler: async (ctx, args) => {
+    bounded(JSON.stringify(args), 4096);
+    const at = Date.parse(args.observedAt);
+    if (!Number.isFinite(at) || !Number.isFinite(Date.parse(args.startedAt)))
+      throw new Error("invalid health time");
+    for (const value of [
+      args.observationsTotal,
+      args.droppedObservationsTotal,
+      args.lostControlObservationsTotal,
+      args.scopeConflictsTotal,
+      args.expiredScopesTotal,
+      args.activeCalls,
+    ])
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid health counter");
+    const healthJson = JSON.stringify({
+      ...args,
+      counterScope: "plugin_boot",
+      precommitCoverage: "unknown_before_local_commit",
+    });
+    const boot = await ctx.db
+      .query("bootHealth")
+      .withIndex("by_boot", (q) =>
+        q
+          .eq("destinationId", args.destinationId)
+          .eq("instanceId", args.instanceId)
+          .eq("pluginBootId", args.pluginBootId),
+      )
+      .unique();
+    if (!boot)
+      await ctx.db.insert("bootHealth", {
+        destinationId: args.destinationId,
+        instanceId: args.instanceId,
+        pluginBootId: args.pluginBootId,
+        observedAt: at,
+        healthJson,
+      });
+    else if (at >= boot.observedAt)
+      await ctx.db.patch("bootHealth", boot._id, { observedAt: at, healthJson });
+    const status = await ctx.db
+      .query("sourceStatus")
+      .withIndex("by_source", (q) =>
+        q.eq("destinationId", args.destinationId).eq("instanceId", args.instanceId),
+      )
+      .unique();
+    const row = {
+      destinationId: args.destinationId,
+      instanceId: args.instanceId,
+      pluginBootId: args.pluginBootId,
+      lastObservedAt: args.observedAt,
+      lastReceivedAt: Date.now(),
+      coverage: "precommit_and_pre_hook_unavailable",
+      healthJson,
+    };
+    if (!status) await ctx.db.insert("sourceStatus", row);
+    else if (at >= Date.parse(status.lastObservedAt))
+      await ctx.db.patch("sourceStatus", status._id, row);
+    return { committed: true };
   },
 });

@@ -27,6 +27,9 @@ class Provider(BaseHTTPRequestHandler):
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         provider_headers.append(dict(self.headers))
+        if 'FAIL_CAPTURE' in json.dumps(data):
+            body=b'{"error":{"message":"simulated post-hook failure","type":"server_error"}}'
+            self.send_response(503);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
         if data.get('stream'):
             body = b''
             for item in [
@@ -52,12 +55,13 @@ def wait_port(port):
     raise RuntimeError(f'port {port} did not open')
 
 
-def request(path='/v1/chat/completions', *, port=8318, key=DEV, headers=None, stream=False, payload_size=32):
+def request(path='/v1/chat/completions', *, port=8318, key=DEV, headers=None, stream=False, payload_size=32, failure=False):
     h={'Authorization':'Bearer '+key,'X-Meshix-Deployment':DEPLOYMENT,'Content-Type':'application/json'}
     if headers: h.update(headers)
     h={k:v for k,v in h.items() if v is not None}
     data={'model':'proof-model','stream':stream,'messages':[{'role':'user','content':'Say CAPTURE_OK. '+('x'*payload_size)}],'max_tokens':32}
     if path=='/v1/responses': data={'model':'proof-model','stream':stream,'input':'Say CAPTURE_OK. '+('x'*payload_size)}
+    if failure: data['messages']=[{'role':'user','content':'FAIL_CAPTURE'}]
     c=http.client.HTTPConnection('127.0.0.1',port,timeout=30)
     start=time.perf_counter_ns();c.request('GET' if path=='/v1/models' else 'POST',path,json.dumps(data),h);r=c.getresponse();first=r.read(1);ttft=(time.perf_counter_ns()-start)/1e6;body=first+r.read();latency=(time.perf_counter_ns()-start)/1e6;status=r.status;c.close()
     return status,body,ttft,latency
@@ -194,11 +198,11 @@ def main():
             report['enabled' if enabled else 'baseline']={'ttfbMs':percentiles([r[2] for r in results]),'latencyMs':percentiles([r[3] for r in results]),'callsPerSecond':len(results)/elapsed,'peakRssKiB':samples}
         base=sum(e['kind']=='completion' for e in wait_events(165))
         captures={}
-        for route,stream in [('/v1/messages',True),('/v1/responses',True),('/v1/chat/completions',False)]:
-            status,body,_,_=request(route,stream=stream);assert status==200,(route,status,body[:200]);captures[route]={'status':status,'downstreamSHA256':hashlib.sha256(body).hexdigest()}
-        found=wait_events(base+3);before=len(found)
+        for route,stream in [(route,stream) for route in ['/v1/messages','/v1/responses','/v1/chat/completions'] for stream in [False,True]]:
+            status,body,_,_=request(route,stream=stream);assert status==200,(route,status,body[:200]);captures[route+('#sse' if stream else '#json')]={'status':status,'downstreamSHA256':hashlib.sha256(body).hexdigest()}
+        found=wait_events(base+6);before=len(found)
         for route in captures:
-            output=[e for e in found if e['route']=='POST '+route and e['kind'] in ['response','stream_chunk']]
+            output=[e for e in found if e['route']=='POST '+route.split('#')[0] and e['kind'] in ['response','stream_chunk']]
             assert any(e.get('body') for e in output), f'{route}: body missing'
             assert not any(e.get('gap') for e in output), f'{route}: incomplete body'
         # Exclusions must produce no outbox observations; duplicate authority input is overwritten by nginx.
@@ -208,11 +212,19 @@ def main():
         assert request(headers={'X-Meshix-Capture-Destination':'harness-prod'})[0]==200
         assert request(headers={'Authorization':None,'X-Api-Key':DEV})[0]==200
         assert request(headers={'X-Api-Key':DEV})[0]==200
-        found=wait_events(base+6)
+        found=wait_events(base+9)
+        for route in ['/v1/models','/v1/messages/count_tokens']:
+            status,body,_,_=request(route);assert status==200,(route,status);captures[route]={'status':status,'downstreamSHA256':hashlib.sha256(body).hexdigest()}
+        found=wait_events(base+11)
+        before=len(found)
+        conn=http.client.HTTPConnection('127.0.0.1',8318,timeout=10);conn.request('POST','/v1/messages','{',{'Authorization':'Bearer '+DEV,'X-Meshix-Deployment':DEPLOYMENT,'Content-Type':'application/json'});res=conn.getresponse();assert res.status==400;res.read();conn.close();time.sleep(.1);assert len(events())==before,'pre-hook coverage boundary changed'
+        report['preHookFailure']='unavailable: malformed request rejected before plugin lifecycle'
+        report['postHookFailure']='failed completion captured'
         assert all(not any(k.lower().startswith('x-meshix-capture-') for k in h) for h in provider_headers),'authority reached provider'
         for e in found:
             body=__import__('base64').b64decode(e.get('body',''));assert hashlib.sha256(body).hexdigest()==e['contentSha256'];assert DEV.encode() not in body
             assert e['destinationId']=='harness-dev' and e['requestId'] and e['pluginBootId']
+        assert not any(e.get('gap') for e in found),'captured protocol content has gaps'
         for e in found:
             if e['kind']=='completion':
                 sequence=[x['sequence'] for x in found if x['requestId']==e['requestId']]
@@ -221,7 +233,10 @@ def main():
         stop_proc(exporter);exporter=start_exporter();assert len(events())==len(found)
         # Outbox unavailable: inference succeeds; ACKed events survive and unACKed events replay.
         stop_proc(exporter);start=time.monotonic();assert request()[0]==200;report['collectorUnavailableInferenceMs']=(time.monotonic()-start)*1000
-        exporter=start_exporter();wait_events(base+7)
+        exporter=start_exporter();wait_events(base+12)
+        # Fault injection is last: stock correctly cools down the failing upstream auth.
+        status,_,_,_=request(failure=True);assert status==503,status
+        failed=wait_events(base+13);assert any(e.get('completionOutcome')=='failed' for e in failed),'post-hook failure missing'
         report['durability']='restart + collector unavailable replay passed';report['scope']='personal/preview/case/conflict/missing deployment/device spoof excluded; gateway overwrite and both carriers passed'
         (ROOT/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))
     finally:

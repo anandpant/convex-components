@@ -54,6 +54,13 @@ export default defineSchema({
     sequence: v.number(),
     receivedAt: v.number(),
   }).index("by_identity", ["destinationId", "identity"]),
+  bootHealth: defineTable({
+    destinationId: v.string(),
+    instanceId: v.string(),
+    pluginBootId: v.string(),
+    observedAt: v.number(),
+    healthJson: v.string(),
+  }).index("by_boot", ["destinationId", "instanceId", "pluginBootId"]),
   sourceStatus: defineTable({
     destinationId: v.string(),
     instanceId: v.string(),
@@ -61,5 +68,6 @@ export default defineSchema({
     lastObservedAt: v.string(),
     lastReceivedAt: v.number(),
     coverage: v.string(),
+    healthJson: v.optional(v.string()),
   }).index("by_source", ["destinationId", "instanceId"]),
 });

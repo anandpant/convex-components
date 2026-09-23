@@ -43,7 +43,7 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return c, errors.New("capture config unavailable")
 	}
-	if s.Mode().Perm()&0077 != 0 {
+	if s.Mode().Perm()&0077 != 0 || s.Size() > 128<<10 {
 		return c, errors.New("capture config must be private")
 	}
 	raw, err := os.ReadFile(path)
@@ -67,6 +67,9 @@ func (c *Config) Validate() error {
 	}
 	if c.QueueBytes < MaxFrame || c.QueueBytes > 64<<20 || c.MaxActive < 1 || c.MaxActive > 4096 {
 		return errors.New("invalid capture bounds")
+	}
+	if len(c.Bindings) > 8 || len(c.Redactions) > 128 {
+		return errors.New("capture configuration count limit")
 	}
 	keys := map[string]bool{}
 	destinations := map[string]string{}
@@ -189,6 +192,8 @@ type Observation struct {
 	Correlation          map[string]string `json:"correlation,omitempty"`
 	CorrelationConflicts []string          `json:"correlationConflicts,omitempty"`
 	ChunkIndex           *int              `json:"stockChunkIndex,omitempty"`
+	ObservedBodyBytes    int               `json:"observedBodyBytes,omitempty"`
+	BodyFraming          string            `json:"bodyFraming,omitempty"`
 	Body                 []byte            `json:"body,omitempty"`
 	ContentSHA256        string            `json:"contentSha256"`
 	ContentBytes         int               `json:"contentBytes"`

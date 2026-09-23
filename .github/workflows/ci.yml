@@ -36,3 +36,13 @@ jobs:
         run: docker build -t cliproxy-capture-proof -f packages/cliproxy-observability/native/harness/Dockerfile packages/cliproxy-observability/native
       - name: Exercise official stock binary and isolated gateway
         run: docker run --rm --cpus 2 --memory 4g cliproxy-capture-proof
+      - name: Package reviewable native artifacts
+        run: packages/cliproxy-observability/native/harness/package-artifacts.sh cliproxy-capture-proof .memory/native-artifacts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cliproxy-native-linux-amd64
+          include-hidden-files: true
+          path: |
+            .memory/native-artifacts/*.tar.gz
+            .memory/native-artifacts/SHA256SUMS
+          if-no-files-found: error

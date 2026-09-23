@@ -34,3 +34,13 @@ describe("release tag check", () => {
     );
   });
 });
+it("accepts only the CLIProxy package's own version", () => {
+  const cliproxy = JSON.parse(
+    readFileSync(
+      new URL("../packages/cliproxy-observability/package.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(check(`cliproxy-observability-v${cliproxy.version}`).status, 0);
+  assert.notEqual(check("cliproxy-observability-v999.0.0").status, 0);
+});

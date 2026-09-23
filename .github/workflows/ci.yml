@@ -24,3 +24,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+
+  native-capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify real fixture integrity (offline)
+        run: python3 packages/cliproxy-observability/native/harness/check_fixtures.py packages/cliproxy-observability/fixtures/real
+      - name: Build and test native capture
+        run: docker build -t cliproxy-capture-proof -f packages/cliproxy-observability/native/harness/Dockerfile packages/cliproxy-observability/native
+      - name: Exercise official stock binary and isolated gateway
+        run: docker run --rm --cpus 2 --memory 4g cliproxy-capture-proof

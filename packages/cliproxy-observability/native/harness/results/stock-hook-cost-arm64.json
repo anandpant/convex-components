@@ -1,0 +1,11 @@
+{
+  "callbackMs": {
+    "p50": 0.764965,
+    "p95": 10.32213,
+    "p99": 18.519576
+  },
+  "concurrency": 8,
+  "measurement": "pinned upstream host + actual native plugin; not a serving binary",
+  "requestBytes": 65579,
+  "samples": 200
+}

@@ -17,6 +17,7 @@ type Outbox struct {
 	db      *sql.DB
 	path    string
 	reserve uint64
+	budget  int64
 }
 
 func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
@@ -39,10 +40,13 @@ func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	o := &Outbox{db, path, reserve}
+	o := &Outbox{db: db, path: path, reserve: reserve, budget: maxBytes}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,payload BLOB NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,state TEXT NOT NULL DEFAULT 'pending'); CREATE INDEX IF NOT EXISTS events_call ON events(destination,instance,boot,request_id,sequence);`)
 	if err == nil {
 		_, err = db.Exec("PRAGMA max_page_count = " + itoa(maxBytes/4096))
+	}
+	if err == nil {
+		err = o.initDelivery()
 	}
 	if err != nil {
 		db.Close()
@@ -61,7 +65,27 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "outbox unavailable", 503)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"durableEvents": count, "payloadBytes": bytes, "remoteDelivery": "not_implemented_slice_1", "retention": "indefinite", "precommitCoverage": "unknown"})
+		json.NewEncoder(w).Encode(map[string]any{"delivery": o.deliveryStatus(), "durableEvents": count, "payloadBytes": bytes, "remoteDelivery": "durable_batches", "retention": "indefinite", "precommitCoverage": "unknown"})
+		return
+	}
+	if r.Method == "POST" && r.URL.Path == "/resume" {
+		var request struct {
+			Destination string `json:"destinationId"`
+		}
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 1024))
+		if json.Unmarshal(raw, &request) != nil || !identifier.MatchString(request.Destination) {
+			http.Error(w, "invalid destination", 400)
+			return
+		}
+		_, err := o.db.Exec("UPDATE batches SET state='pending',next_attempt=0 WHERE destination=? AND state='quarantined'", request.Destination)
+		if err == nil {
+			_, err = o.db.Exec("UPDATE delivery_status SET state='pending',reason='operator_resume' WHERE destination=?", request.Destination)
+		}
+		if err != nil {
+			http.Error(w, "resume unavailable", 503)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]bool{"resumed": true})
 		return
 	}
 	if r.Method != "POST" || r.URL.Path != "/events" {

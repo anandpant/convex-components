@@ -167,7 +167,13 @@ export async function handleCliproxyCaptureRequest(
     return new Response("unsupported content type", { status: 415 });
   let parsed: Awaited<ReturnType<typeof validateSegment>>;
   try {
-    parsed = await validateSegment(await readBoundedCaptureBody(request), options);
+    const raw = await readBoundedCaptureBody(request);
+    const candidate = JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(raw));
+    if (candidate?.operation === "health") {
+      if (candidate.schemaVersion !== 1 || candidate.destinationId !== options.destinationId || !options.instanceIds.includes(candidate.instanceId)) return new Response("scope mismatch",{status:403});
+      return Response.json({ready:true,destinationId:options.destinationId,deploymentId:options.deploymentId,instanceId:candidate.instanceId,schemaVersion:1});
+    }
+    parsed = await validateSegment(raw, options);
   } catch (error) {
     return new Response("invalid capture segment", {
       status: error instanceof RangeError ? 413 : 400,

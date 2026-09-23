@@ -1,0 +1,90 @@
+{
+  "name": "@shpitdev/convex-cliproxy-observability",
+  "description": "Private stock CLIProxy capture, protocol projections, and bounded model-call reads.",
+  "version": "0.1.0",
+  "author": "Anand Pant",
+  "license": "Apache-2.0",
+  "repository": "github:anandpant/convex-components",
+  "homepage": "https://github.com/anandpant/convex-components#readme",
+  "bugs": {
+    "url": "https://github.com/anandpant/convex-components/issues"
+  },
+  "keywords": [
+    "convex",
+    "component",
+    "cliproxy",
+    "observability"
+  ],
+  "type": "module",
+  "files": [
+    "CHANGELOG.md",
+    "dist",
+    "src"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./test": "./src/test.ts",
+    "./_generated/component.js": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./_generated/component": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./convex.config.js": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    },
+    "./convex.config": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    },
+    "./model-call": {
+      "types": "./dist/model-call/index.d.ts",
+      "default": "./dist/model-call/index.js"
+    },
+    "./protocols": {
+      "types": "./dist/protocols/index.d.ts",
+      "default": "./dist/protocols/index.js"
+    },
+    "./capture": {
+      "types": "./dist/capture/index.d.ts",
+      "default": "./dist/capture/index.js"
+    }
+  },
+  "types": "./dist/client.d.ts",
+  "module": "./dist/client.js",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc6 --project tsconfig.build.json",
+    "build:clean": "rm -rf dist *.tsbuildinfo && pnpm build",
+    "codegen": "convex codegen --component-dir ./src/component",
+    "pack:check": "pnpm build:clean && pnpm pack --pack-destination .pack && node scripts/check-pack.mjs",
+    "prepare": "pnpm build",
+    "test": "vitest run --typecheck",
+    "typecheck": "tsc6 --noEmit && tsc6 --noEmit --project tsconfig.test.json"
+  },
+  "peerDependencies": {
+    "convex": "^1.42.2"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "convex": "^1.45.0",
+    "convex-test": "^0.0.56",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

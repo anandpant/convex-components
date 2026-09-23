@@ -16,14 +16,22 @@ for (const mode of ["missing", "same", "different", "unavailable"])
       );
       writeFileSync(
         join(dir, "npm"),
-        `#!/usr/bin/env node\nconst fs=require("node:fs");const action=process.argv[2];if(action==="view"){if(process.env.TEST_MODE==="missing"){process.stderr.write("E404");process.exit(1)}if(process.env.TEST_MODE==="unavailable"){process.stderr.write("E503");process.exit(1)}process.stdout.write(JSON.stringify(process.env.TEST_MODE==="same"?"sha512-exact":"sha512-different"))}else if(action==="pack")process.stdout.write(JSON.stringify([{integrity:"sha512-exact"}]));else if(action==="publish")fs.writeFileSync("published",JSON.stringify(process.argv.slice(2)));`,
+        `#!/usr/bin/env node\nconst fs=require("node:fs");const action=process.argv[2];if(action==="pack")process.stdout.write(JSON.stringify([{integrity:"sha512-exact"}]));else if(action==="publish")fs.writeFileSync("published",JSON.stringify(process.argv.slice(2)));`,
         { mode: 0o755 },
       );
-      const result = spawnSync(process.execPath, [script], {
-        cwd: dir,
-        env: { ...process.env, PATH: dir + ":" + process.env.PATH, TEST_MODE: mode },
-        encoding: "utf8",
-      });
+      writeFileSync(
+        join(dir, "mock-fetch.mjs"),
+        `globalThis.fetch=async(url)=>{if(!String(url).endsWith("%40shpitdev%2Ftest-release/0.1.0"))throw Error("Wrong exact-version URL");const mode=process.env.TEST_MODE;return {ok:mode==="same"||mode==="different",status:mode==="missing"?404:mode==="unavailable"?503:200,json:async()=>({name:"@shpitdev/test-release",version:"0.1.0",dist:{integrity:mode==="same"?"sha512-exact":"sha512-different"}})}};`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        ["--import", join(dir, "mock-fetch.mjs"), script],
+        {
+          cwd: dir,
+          env: { ...process.env, PATH: dir + ":" + process.env.PATH, TEST_MODE: mode },
+          encoding: "utf8",
+        },
+      );
       assert.equal(result.status, mode === "missing" || mode === "same" ? 0 : 1);
       assert.equal(existsSync(join(dir, "published")), mode === "missing");
       if (mode === "missing")

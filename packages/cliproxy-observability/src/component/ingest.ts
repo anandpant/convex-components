@@ -124,6 +124,7 @@ export const admit = mutation({
       (call.terminalSequence !== undefined && args.throughSequence > call.terminalSequence)
     )
       throw new Error("capture_sequence_conflict");
+    if (args.sequence === 1) await ctx.db.patch("calls", call._id, args.correlation);
     await ctx.db.insert("segments", {
       destinationId: args.destinationId,
       callId: args.callId,

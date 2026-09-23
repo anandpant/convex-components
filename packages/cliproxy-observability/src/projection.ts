@@ -1,7 +1,7 @@
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 import type { CliproxyObservability } from "./client.js";
 import { resolveCallBlob, type PrivateCaptureStorage } from "./content/index.js";
-import type { CaptureObservationV1 } from "./capture/index.js";
+import { sha256, type CaptureObservationV1 } from "./capture/index.js";
 import { applyObservation, type ProjectionCheckpoint } from "./protocols/checkpoint.js";
 import type { ModelCallV1 } from "./model-call/index.js";
 /** Project at most two immutable segments. Host schedules the next page when `more` is true. */
@@ -30,6 +30,15 @@ export async function projectPendingSegments(
     const call = JSON.parse(state.summaryJson) as ModelCallV1;
     call.capture.projectedThroughSequence = state.projectedThroughSequence;
     const checkpoint = JSON.parse(state.checkpointJson) as ProjectionCheckpoint;
+    if (checkpoint.sseBlob) {
+      const stored = await resolveCallBlob(
+        options.storage,
+        [checkpoint.sseBlob],
+        checkpoint.sseBlob,
+      );
+      checkpoint.sse = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(stored));
+      delete checkpoint.sseBlob;
+    }
     let through = state.projectedThroughSequence;
     let waitingForGap = false;
     for (const segment of page.segments) {
@@ -51,6 +60,21 @@ export async function projectPendingSegments(
     }
     if (through === state.projectedThroughSequence)
       return { progressed: false, more: false, waitingForGap };
+    // A frame can exceed Convex's checkpoint budget. Persist pending framing bytes
+    // privately; the bounded component checkpoint owns the exact reference.
+    if (checkpoint.sse && checkpoint.sse.pendingBase64.length > 16 * 1024) {
+      const bytes = new TextEncoder().encode(JSON.stringify(checkpoint.sse));
+      const digest = await sha256(bytes);
+      const ref = {
+        key: `observability/cliproxy/v2/${destinationId}/${state.instanceId}/${callId}/parser/${digest}.json`,
+        sha256: digest,
+        byteLength: bytes.length,
+        contentType: "application/json",
+      };
+      await options.storage.put(ref, bytes);
+      checkpoint.sseBlob = ref;
+      delete checkpoint.sse;
+    }
     const committed = await ctx.runMutation(client.component.ingest.commitProjection, {
       destinationId,
       callId,

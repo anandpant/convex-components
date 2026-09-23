@@ -220,3 +220,54 @@ it("records projection failure without losing the raw receipt and clears it on r
   await projectPendingSegments(s.ctx, { ...s.options, callId });
   expect((await s.backend.query(api.queries.getCall, args))?.projectionFailure).toBeUndefined();
 });
+it("indexes exact request correlations when an earlier segment arrives last", async () => {
+  const s = setup();
+  await s.post(await envelope(events.slice(3).map((o) => ({ ...o, correlation: undefined }))));
+  await s.post(
+    await envelope(
+      events.slice(0, 3).map((o) => ({ ...o, correlation: { runId: "late-request-run" } })),
+    ),
+  );
+  const page = await s.backend.query(api.queries.pageRecentSummaries, {
+    destinationId: events[0]!.destinationId,
+    correlation: { kind: "runId", value: "late-request-run" },
+  });
+  expect(page.calls).toHaveLength(1);
+});
+it("stores large pending SSE framing privately across projection revisions", async () => {
+  const s = setup();
+  const index = events.findIndex((o) => o.kind === "stream_chunk" && o.contentBytes > 0);
+  const original = events[index]!;
+  const body = encode.encode(
+    atob(original.body!).replace("{", '{"padding":"' + "x".repeat(30000) + '",'),
+  );
+  const parts = [body.slice(0, 20000), body.slice(20000)];
+  const split = await Promise.all(
+    parts.map(async (bytes) => ({
+      ...original,
+      body: btoa(String.fromCharCode(...bytes)),
+      contentBytes: bytes.length,
+      contentSha256: await sha256(bytes),
+    })),
+  );
+  const all = [...events.slice(0, index), ...split, ...events.slice(index + 1)].map((o, i) => ({
+    ...o,
+    sequence: i + 1,
+  }));
+  const callId = await callIdentity(all[0]!);
+  expect((await s.post(await envelope(all.slice(0, index + 1)))).status).toBe(200);
+  await projectPendingSegments(s.ctx, { ...s.options, callId });
+  const state = await s.backend.query(api.queries.getProcessingState, {
+    destinationId: events[0]!.destinationId,
+    callId,
+  });
+  expect(state!.checkpointJson.length).toBeLessThan(4096);
+  expect(JSON.parse(state!.checkpointJson).sseBlob).toBeDefined();
+  expect((await s.post(await envelope(all.slice(index + 1)))).status).toBe(200);
+  await projectPendingSegments(s.ctx, { ...s.options, callId });
+  const result = await s.backend.query(api.queries.getCall, {
+    destinationId: events[0]!.destinationId,
+    callId,
+  });
+  expect(JSON.parse(result!.summaryJson).capture.usage).toBe("complete");
+});

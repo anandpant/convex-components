@@ -62,3 +62,28 @@ it("frames UTF-8 and multiline SSE across every byte split", () => {
     expect(reader.finish().truncated).toBe(false);
   }
 });
+it("checkpoints an SSE frame split across observations without invalidating usage", async () => {
+  const events = recording("messages-sse");
+  const index = events.findIndex((o) => o.kind === "stream_chunk" && o.contentBytes > 20);
+  const original = events[index]!;
+  const bytes = decodeBody(original);
+  const parts = [bytes.slice(0, 13), bytes.slice(13)];
+  const chunks = parts.map((body) => ({
+    ...original,
+    body: btoa(String.fromCharCode(...body)),
+    contentBytes: body.length,
+  }));
+  const split = [...events.slice(0, index), ...chunks, ...events.slice(index + 1)].map((o, i) => ({
+    ...o,
+    sequence: i + 1,
+  }));
+  const call = initialCall(split[0]!, await callIdentity(split[0]!), 1);
+  let state: ProjectionCheckpoint = {};
+  for (const event of split) {
+    applyObservation(call, state, event);
+    state = JSON.parse(JSON.stringify(state)) as ProjectionCheckpoint;
+  }
+  expect(call.capture.projection).toBe("complete");
+  expect(call.capture.usage).toBe("complete");
+  expect(call.outputTokens).toBeGreaterThan(0);
+});

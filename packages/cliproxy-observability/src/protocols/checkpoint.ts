@@ -1,13 +1,19 @@
-import type { ModelCallV1, UsageMeasurement } from "../model-call/index.js";
+import type {
+  ModelCallV1,
+  UsageMeasurement,
+  PrivateContentReference,
+} from "../model-call/index.js";
 import type { CaptureObservationV1 } from "../capture/index.js";
 import { decodeBody } from "../capture/index.js";
 import { assembleResponsesStream } from "./responses.js";
-import { SSEReader } from "./framing.js";
+import { SSEReader, type SSECheckpoint } from "./framing.js";
 import { count, list, nanoTime, object, parseObject } from "./values.js";
 import { extractUsage } from "./usage.js";
 import type { CliproxyProjection, RecordValue } from "./types.js";
 /** Bounded semantic state. Emitted text/tools stay in immutable content segments. */
 export type ProjectionCheckpoint = {
+  sse?: SSECheckpoint;
+  sseBlob?: PrivateContentReference;
   usage?: RecordValue;
   terminal?: string;
   usageFinal?: boolean;
@@ -201,7 +207,7 @@ export function applyObservation(
       state.invalid = true;
     }
   }
-  if (o.kind === "response" || o.kind === "stream_chunk") {
+  if (o.kind === "response" || o.kind === "stream_chunk" || o.kind === "completion") {
     if (call.timeToFirstByteMs === undefined && body.length)
       call.timeToFirstByteMs = o.offsetNs / 1e6;
     try {
@@ -213,8 +219,8 @@ export function applyObservation(
           if (call.operation === "token_count") call.tokenCount = count(event.input_tokens);
         }
       }
-      if (o.kind === "stream_chunk" && body.length) {
-        const reader = new SSEReader();
+      if ((o.kind === "stream_chunk" || o.kind === "completion") && body.length) {
+        const reader = new SSEReader(state.sse);
         for (const frame of reader.feed(body, o.observedAt)) {
           if (frame.data === "[DONE]") {
             if (call.clientProtocol === "chat_completions" && state.chatFinished)
@@ -226,13 +232,20 @@ export function applyObservation(
             call.timeToFirstContentMs = o.offsetNs / 1e6;
           observeProtocol(call, state, event, true);
         }
-        if (reader.finish().truncated) state.invalid = true;
+        state.sse = reader.checkpoint();
       }
     } catch {
       state.invalid = true;
     }
   }
   if (o.kind === "completion") {
+    try {
+      if (new SSEReader(state.sse).finish().truncated) state.invalid = true;
+    } catch {
+      state.invalid = true;
+    }
+    delete state.sse;
+    delete state.sseBlob;
     call.completionOutcome = o.completionOutcome;
     call.executionStatusCode = o.executionStatusCode;
     call.endTimeUnixNano = nanoTime(o.executionCompletedAt);

@@ -1,0 +1,92 @@
+{
+  "fixtureProvenance": "simulated_provider_playback",
+  "stockVersion": "7.3.5",
+  "stockSHA256": "79766341173c68f9df506fdb9d0b3e1277a7adc58c925812ca0bcc0ecd7af30f",
+  "architecture": "aarch64",
+  "load": {
+    "concurrency": 8,
+    "calls": 160,
+    "requestContentBytes": 65536
+  },
+  "baseline": {
+    "ttfbMs": {
+      "p50": 55.788406,
+      "p95": 67.708318,
+      "p99": 72.385341
+    },
+    "latencyMs": {
+      "p50": 55.822865,
+      "p95": 67.762943,
+      "p99": 75.393871
+    },
+    "callsPerSecond": 142.28060356940088,
+    "peakRssKiB": {
+      "stock": 60612,
+      "exporter": 9640
+    }
+  },
+  "baselineAuthorityPositiveControl": true,
+  "enabled": {
+    "ttfbMs": {
+      "p50": 89.552024,
+      "p95": 147.276339,
+      "p99": 153.602523
+    },
+    "latencyMs": {
+      "p50": 92.403971,
+      "p95": 148.580459,
+      "p99": 154.501144
+    },
+    "callsPerSecond": 85.21956821526165,
+    "peakRssKiB": {
+      "stock": 85668,
+      "exporter": 18568
+    }
+  },
+  "preHookFailure": "unavailable: malformed request rejected before plugin lifecycle",
+  "postHookFailure": "failed completion captured",
+  "protocolProof": {
+    "/v1/messages#json": {
+      "status": 200,
+      "downstreamSHA256": "837996a2ab89848064d104f105a927377f900792a1aa6b33b8f8683be7b73cda"
+    },
+    "/v1/messages#sse": {
+      "status": 200,
+      "downstreamSHA256": "2638123792c94085c3458fdf9119c374a8ef640ae0fb10753d5e1b6573186845"
+    },
+    "/v1/responses#json": {
+      "status": 200,
+      "downstreamSHA256": "d515a4618c0cf86049c62b2b0c6d9948f10a344f0b9deee569986f558ed9622a"
+    },
+    "/v1/responses#sse": {
+      "status": 200,
+      "downstreamSHA256": "fc1805c3634654c4610b7518e8076970c48fa4b48285d9c660997b0f8119dd7f"
+    },
+    "/v1/chat/completions#json": {
+      "status": 200,
+      "downstreamSHA256": "bec9f6af8f135205cbe36e75f88beb260108f0f9357318a8ab65bc210fbc6aa8"
+    },
+    "/v1/chat/completions#sse": {
+      "status": 200,
+      "downstreamSHA256": "fb51726963ba8a84eac3a8a716be5f4444e6323a41c6cbfacffa7768f5ee7f29"
+    },
+    "/v1/models": {
+      "status": 200,
+      "downstreamSHA256": "584585c32db7f092d9eb40e1ac80beb18d401705ffaab3c6ff366e4a7591e094"
+    },
+    "/v1/messages/count_tokens": {
+      "status": 200,
+      "downstreamSHA256": "e267f5b3018a2ed6ce5715cfb9064b216b5e1fc22e5e762039d52e65a4652f53"
+    }
+  },
+  "durableEventsBeforeRestart": 1027,
+  "collectorUnavailableInferenceMs": 1.4647860080003738,
+  "durability": "restart + collector unavailable replay passed",
+  "scope": "personal/preview/case/conflict/missing deployment/device spoof excluded; gateway overwrite and both carriers passed",
+  "sourceCommit": "25c841569cdbcfb44827d9c084805f98adf5532e",
+  "resources": {
+    "cpus": 2,
+    "memoryMiB": 4096,
+    "environment": "local Docker Linux ARM64; not CT101"
+  }
+}

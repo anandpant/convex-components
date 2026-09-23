@@ -1,0 +1,17 @@
+{
+  "callbackMs": {
+    "p50": 0.7301,
+    "p95": 16.357178,
+    "p99": 24.587179
+  },
+  "concurrency": 8,
+  "measurement": "pinned upstream host + actual native plugin; not a serving binary",
+  "requestBytes": 65579,
+  "samples": 200,
+  "sourceCommit": "25c841569cdbcfb44827d9c084805f98adf5532e",
+  "resources": {
+    "cpus": 2,
+    "memoryMiB": 4096,
+    "environment": "local Docker Linux ARM64; not CT101"
+  }
+}

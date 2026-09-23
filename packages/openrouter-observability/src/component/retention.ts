@@ -19,9 +19,12 @@ const MIGRATION_RETRY_DELAY_MS = 5 * 60 * 1000;
 function retentionDays() {
   const configured = env.RETENTION_DAYS;
   if (configured === undefined) return DEFAULT_RETENTION_DAYS;
+  if (configured === "indefinite") return null;
   const days = Number(configured);
   if (!Number.isSafeInteger(days) || days < 1 || days > MAX_RETENTION_DAYS) {
-    throw new Error(`RETENTION_DAYS must be an integer from 1 to ${MAX_RETENTION_DAYS}`);
+    throw new Error(
+      `RETENTION_DAYS must be "indefinite" or an integer from 1 to ${MAX_RETENTION_DAYS}`,
+    );
   }
   return days;
 }
@@ -29,6 +32,8 @@ function retentionDays() {
 export const deleteExpired = internalMutation({
   args: { cutoff: v.number() },
   handler: async (ctx, args) => {
+    // Recheck at execution time so continuations queued before a config change stop too.
+    if (retentionDays() === null) return { deletedSpans: 0 };
     const spans = await ctx.db
       .query("spans")
       .withIndex("by_received", (query) => query.lt("receivedAt", args.cutoff))
@@ -229,7 +234,7 @@ export const deleteLegacyDeliveries = internalMutation({
 export const start = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const retentionMs = retentionDays() * 24 * 60 * 60 * 1000;
+    const days = retentionDays();
     await ensureMigrationScheduled(ctx, SPAN_MIGRATION, async () =>
       ctx.scheduler.runAfter(0, internal.retention.migrateLegacyData, {}),
     );
@@ -239,8 +244,9 @@ export const start = internalMutation({
     await ensureMigrationScheduled(ctx, CORRELATION_MIGRATION, async () =>
       ctx.scheduler.runAfter(0, internal.retention.backfillCorrelationProjections, {}),
     );
+    if (days === null) return;
     await ctx.scheduler.runAfter(0, internal.retention.deleteExpired, {
-      cutoff: Date.now() - retentionMs,
+      cutoff: Date.now() - days * 24 * 60 * 60 * 1000,
     });
   },
 });

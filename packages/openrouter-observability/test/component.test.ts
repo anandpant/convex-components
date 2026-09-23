@@ -514,6 +514,130 @@ describe("OpenRouter observability component", () => {
     );
   });
 
+  it("keeps aged spans indefinitely while migrations and backfills complete", async () => {
+    vi.useFakeTimers();
+    process.env.RETENTION_DAYS = "indefinite";
+    const backend = createBackend();
+    await backend.run(async (ctx) => {
+      for (let index = 0; index < 9; index += 1) {
+        await ctx.db.insert("spans", {
+          traceId: "legacy",
+          spanId: `span-${index}`,
+          name: "legacy",
+          attributes: [{ key: "trace.metadata.job_id", valueJson: '{"stringValue":"job-123"}' }],
+          receivedAt: 1,
+        });
+        await ctx.db.insert("deliveries", { byteLength: 2, rawBody: "{}", receivedAt: 1 });
+      }
+    });
+
+    await backend.mutation(internal.retention.start, {});
+    const scheduled = await backend.run(async (ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(scheduled.map(({ name }) => name)).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("retention:deleteExpired")]),
+    );
+    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
+
+    const spans = await storedSpans(backend);
+    expect(spans).toHaveLength(9);
+    for (const span of spans) {
+      expect(span).toMatchObject({ resourceAttributes: [], jobId: "job-123", attributes: [] });
+    }
+    expect(await backend.run(async (ctx) => ctx.db.query("spanKeys").collect())).toHaveLength(9);
+    expect(await backend.run(async (ctx) => ctx.db.query("deliveries").collect())).toHaveLength(0);
+    expect(await backend.query(api.queries.getCorrelationProjectionCoverage, {})).toEqual({
+      state: "ready",
+      processedSpans: 9,
+    });
+    const migrations = await backend.run(async (ctx) => ctx.db.query("migrationState").collect());
+    expect(migrations).toHaveLength(3);
+    for (const migration of migrations) expect(migration.completedAt).toBeDefined();
+  });
+
+  it("stops an already queued cleanup continuation after switching to indefinite", async () => {
+    vi.useFakeTimers();
+    process.env.RETENTION_DAYS = "1";
+    const backend = createBackend();
+    await backend.run(async (ctx) => {
+      for (let index = 0; index < 24; index += 1) {
+        const spanDocumentId = await ctx.db.insert("spans", {
+          traceId: "expired",
+          spanId: `span-${index}`,
+          name: "expired",
+          attributes: [],
+          resourceAttributes: [],
+          receivedAt: 1,
+        });
+        await ctx.db.insert("spanKeys", {
+          traceId: "expired",
+          spanId: `span-${index}`,
+          spanDocumentId,
+        });
+      }
+    });
+    expect(await backend.mutation(internal.retention.deleteExpired, { cutoff: 5_000 })).toEqual({
+      deletedSpans: 8,
+    });
+    const remaining = await storedSpans(backend);
+    const keys = await backend.run(async (ctx) => ctx.db.query("spanKeys").collect());
+    const queued = await backend.run(async (ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(queued).toHaveLength(1);
+    expect(queued[0].state.kind).toBe("pending");
+
+    process.env.RETENTION_DAYS = "indefinite";
+    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
+    expect(await storedSpans(backend)).toEqual(remaining);
+    expect(await backend.run(async (ctx) => ctx.db.query("spanKeys").collect())).toEqual(keys);
+    const finished = await backend.run(async (ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({ _id: queued[0]._id, state: { kind: "success" } });
+    expect(await backend.mutation(internal.retention.deleteExpired, { cutoff: 5_000 })).toEqual({
+      deletedSpans: 0,
+    });
+  });
+
+  it.each([
+    [undefined, 30],
+    ["1", 1],
+    ["3650", 3650],
+  ] as const)(
+    "uses the expected numeric cutoff for RETENTION_DAYS=%s",
+    async (configured, days) => {
+      vi.useFakeTimers();
+      if (configured !== undefined) process.env.RETENTION_DAYS = configured;
+      const backend = createBackend();
+      const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+      await backend.run(async (ctx) => {
+        for (const [spanId, receivedAt] of [
+          ["expired", cutoff - 1],
+          ["boundary", cutoff],
+          ["current", Date.now()],
+        ] as const) {
+          await ctx.db.insert("spans", {
+            traceId: "retention",
+            spanId,
+            name: spanId,
+            attributes: [],
+            resourceAttributes: [],
+            receivedAt,
+          });
+        }
+      });
+      await backend.mutation(internal.retention.start, {});
+      await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
+      expect((await storedSpans(backend)).map(({ spanId }) => spanId).sort()).toEqual([
+        "boundary",
+        "current",
+      ]);
+    },
+  );
+
   it("migrates legacy spans and removes legacy raw deliveries in bounded batches", async () => {
     vi.useFakeTimers();
     const backend = createBackend();

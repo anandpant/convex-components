@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Accepts `RETENTION_DAYS: "indefinite"` to keep spans and their deduplication keys indefinitely. Cleanup is not scheduled, and already-queued cleanup continuations delete nothing and stop.
+- Keeps migrations and correlation backfills running under indefinite retention. The default of 30 days and numeric range of 1–3650 days are unchanged.
+- Documents that external blob retention is configured separately in the host's object store.
+
 ## 0.3.0
 
 - Moves authenticated trace ingestion into a host HTTP handler with a host-owned blob storage adapter.

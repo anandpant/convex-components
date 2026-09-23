@@ -135,3 +135,19 @@ func TestStockResponsesUndelimitedCandidate(t *testing.T) {
 		t.Fatal("false truncation")
 	}
 }
+
+func TestRedactionDepthFailureWithholdsOriginal(t *testing.T) {
+	nested := []byte(`{"arguments":"{\"api_key\":\"unknown-secret\"}"}`)
+	if out, ok := scrubJSONDepth(nested, nil, 32); ok || len(out) != 0 {
+		t.Fatal("failed nested redaction retained original credential")
+	}
+	deep := []byte(strings.Repeat(`{"value":`, 34) + `{"api_key":"unknown-secret"}` + strings.Repeat(`}`, 34))
+	r := FrameRedactor{}
+	out, _, gap := r.Feed(deep, 1, false, true, nil)
+	if len(out) != 0 || gap != "invalid_or_unredactable_json_withheld" {
+		t.Fatal("depth limit did not withhold the frame")
+	}
+	if out, ok := scrubJSON([]byte(`{"known-secret":"a"}`), []string{"known-secret"}); ok || len(out) != 0 {
+		t.Fatal("secret object key persisted")
+	}
+}

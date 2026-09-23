@@ -28,36 +28,54 @@ func scrubJSONDepth(b []byte, secrets []string, depth int) ([]byte, bool) {
 	if d.Decode(&v) != nil || !json.Valid(b) {
 		return nil, false
 	}
-	var walk func(any) any
-	walk = func(v any) any {
+	valid := true
+	var walk func(any, int) any
+	walk = func(v any, level int) any {
+		if level > 32 {
+			valid = false
+			return nil
+		}
 		switch x := v.(type) {
 		case map[string]any:
 			for k, a := range x {
+				// Unknown structural fields can still contain configured secrets in their names.
+				for _, secret := range secrets {
+					if strings.Contains(k, secret) {
+						valid = false
+						return nil
+					}
+				}
 				if sensitive[strings.ToLower(k)] {
 					x[k] = "[REDACTED]"
 				} else {
-					x[k] = walk(a)
+					x[k] = walk(a, level+1)
 				}
 			}
 		case []any:
 			for i, a := range x {
-				x[i] = walk(a)
+				x[i] = walk(a, level+1)
 			}
 		case string:
-			// Tool arguments and nested serialized JSON can themselves contain credentials.
 			if json.Valid([]byte(x)) && (strings.HasPrefix(strings.TrimSpace(x), "{") || strings.HasPrefix(strings.TrimSpace(x), "[")) {
-				if nested, ok := scrubJSONDepth([]byte(x), secrets, depth+1); ok {
-					x = string(nested)
+				nested, ok := scrubJSONDepth([]byte(x), secrets, level+1)
+				if !ok {
+					valid = false
+					return nil
 				}
+				x = string(nested)
 			}
-			for _, s := range secrets {
-				x = strings.ReplaceAll(x, s, "[REDACTED]")
+			for _, secret := range secrets {
+				x = strings.ReplaceAll(x, secret, "[REDACTED]")
 			}
 			return x
 		}
 		return v
 	}
-	out, err := json.Marshal(walk(v))
+	clean := walk(v, depth)
+	if !valid {
+		return nil, false
+	}
+	out, err := json.Marshal(clean)
 	return out, err == nil
 }
 func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, secrets []string) ([]byte, *uint64, string) {
@@ -76,7 +94,7 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 		b, ok := scrubJSON(r.pending, secrets)
 		r.pending = nil
 		if !ok {
-			return nil, nil, "malformed_json_withheld"
+			return nil, nil, "invalid_or_unredactable_json_withheld"
 		}
 		return b, nil, ""
 	}
@@ -118,7 +136,7 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 			// Comments, retry and IDs are unnecessary and may contain credentials.
 		}
 		if !valid {
-			gap = "malformed_sse_withheld"
+			gap = "invalid_or_unredactable_sse_withheld"
 			continue
 		}
 		if len(data) == 0 {
@@ -131,7 +149,7 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 			clean, ok = scrubJSON(raw, secrets)
 		}
 		if !ok {
-			gap = "malformed_sse_withheld"
+			gap = "invalid_or_unredactable_sse_withheld"
 			continue
 		}
 		if event != "" {

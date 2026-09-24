@@ -101,6 +101,14 @@ export function assembleAnthropicStream(events: RecordValue[]) {
   for (const [index, argumentsText] of argumentsByIndex) {
     const block = blocks.get(index);
     if (block) {
+      if (
+        argumentsText === "" &&
+        block.type === "tool_use" &&
+        block.input !== null &&
+        typeof block.input === "object" &&
+        !Array.isArray(block.input)
+      )
+        continue;
       try {
         block.input = JSON.parse(argumentsText);
       } catch {

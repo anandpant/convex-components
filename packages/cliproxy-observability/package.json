@@ -1,7 +1,7 @@
 {
   "name": "@shpitdev/convex-cliproxy-observability",
   "description": "Private stock CLIProxy capture, protocol projections, and bounded model-call reads.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "Anand Pant",
   "license": "Apache-2.0",
   "repository": "github:anandpant/convex-components",

@@ -13,7 +13,8 @@ import (
 	"strings"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
+const CapturePolicy = "hook-body-v1"
 const MaxBody = 1 << 20
 const MaxFrame = 2 << 20
 
@@ -32,7 +33,6 @@ type Config struct {
 	Revision   string    `json:"revision"`
 	Socket     string    `json:"socket"`
 	Bindings   []Binding `json:"bindings"`
-	Redactions []string  `json:"redactions"`
 	QueueBytes int       `json:"queueBytes"`
 	MaxActive  int       `json:"maxActive"`
 }
@@ -68,7 +68,7 @@ func (c *Config) Validate() error {
 	if c.QueueBytes < MaxFrame || c.QueueBytes > 64<<20 || c.MaxActive < 1 || c.MaxActive > 4096 {
 		return errors.New("invalid capture bounds")
 	}
-	if len(c.Bindings) > 8 || len(c.Redactions) > 128 {
+	if len(c.Bindings) > 8 {
 		return errors.New("capture configuration count limit")
 	}
 	keys := map[string]bool{}
@@ -82,11 +82,6 @@ func (c *Config) Validate() error {
 		}
 		destinations[b.Destination] = b.Deployment
 		keys[b.Key] = true
-	}
-	for _, s := range c.Redactions {
-		if len(s) == 0 || len(s) > 4096 {
-			return errors.New("invalid redaction value")
-		}
 	}
 	return nil
 }
@@ -175,7 +170,7 @@ type Observation struct {
 	ScopeConflicts       uint64            `json:"scopeConflictsTotal"`
 	SchemaVersion        int               `json:"schemaVersion"`
 	PluginVersion        string            `json:"pluginVersion"`
-	RedactionVersion     string            `json:"redactionVersion"`
+	CapturePolicy        string            `json:"capturePolicy"`
 	Destination          string            `json:"destinationId"`
 	Instance             string            `json:"instanceId"`
 	Boot                 string            `json:"pluginBootId"`
@@ -187,6 +182,11 @@ type Observation struct {
 	Route                string            `json:"route"`
 	Revision             string            `json:"configRevision"`
 	SourceFormat         string            `json:"sourceFormat,omitempty"`
+	SelectedAuthID       string            `json:"selectedAuthId,omitempty"`
+	SelectedAuthIndex    string            `json:"selectedAuthIndex,omitempty"`
+	ExecutionModel       string            `json:"executionModel,omitempty"`
+	ExecutionProtocol    string            `json:"executionProtocol,omitempty"`
+	MetadataOmissions    []string          `json:"metadataOmissions,omitempty"`
 	Model                string            `json:"requestedModel,omitempty"`
 	TraceID              string            `json:"sourceTraceId,omitempty"`
 	Correlation          map[string]string `json:"correlation,omitempty"`
@@ -202,9 +202,9 @@ type Observation struct {
 	StartedAt            string            `json:"executionStartedAt,omitempty"`
 	CompletedAt          string            `json:"executionCompletedAt,omitempty"`
 	Error                string            `json:"error,omitempty"`
+	ObservedErrorBytes   int               `json:"observedErrorBytes,omitempty"`
+	ErrorPresent         bool              `json:"errorPresent,omitempty"`
 	Gap                  string            `json:"gap,omitempty"`
-	// A framing-safe body can span multiple observed chunks; its final-byte time is this observation.
-	BodyFromSequence *uint64 `json:"bodyFromSequence,omitempty"`
 }
 
 func (o Observation) Identity() string {

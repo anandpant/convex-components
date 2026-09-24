@@ -54,6 +54,11 @@ export type ModelCallV1 = {
   parentSpanId?: string;
   requestModel?: string;
   responseModel?: string;
+  /** Last observed after-auth execution, not inferred provider identity. */
+  executionModel?: string;
+  selectedAuthId?: string;
+  selectedAuthIndex?: string;
+  executionProtocol?: string;
   providerName?: string;
   streamed?: boolean;
   operation: "generation" | "token_count" | "discovery" | "unknown";
@@ -85,6 +90,8 @@ export type ModelCallV1 = {
   capture: {
     raw: EvidenceState;
     projection: EvidenceState;
+    projectionIssue?:
+      "malformed_payload" | "truncated_frame" | "frame_limit" | "unsupported_protocol";
     usage: EvidenceState;
     preHook: "unavailable";
     projectedThroughSequence: number;
@@ -94,6 +101,7 @@ export type ModelCallV1 = {
     parserVersion: string;
     pluginVersion?: string;
     redactionVersion?: string;
+    capturePolicy?: "hook-body-v1";
     lastObservedAt?: string;
   };
   receivedAt: number;
@@ -111,6 +119,11 @@ export type OpenRouterSpanInput = {
   parentSpanId?: string;
   requestModel?: string;
   responseModel?: string;
+  /** Last observed after-auth execution, not inferred provider identity. */
+  executionModel?: string;
+  selectedAuthId?: string;
+  selectedAuthIndex?: string;
+  executionProtocol?: string;
   providerName?: string;
   streamed?: boolean;
   startTimeUnixNano?: string;

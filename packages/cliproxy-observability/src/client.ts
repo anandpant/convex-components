@@ -105,6 +105,7 @@ export function initialCall(
       parserVersion: PARSER_VERSION,
       pluginVersion: o.pluginVersion,
       redactionVersion: o.redactionVersion,
+      capturePolicy: o.capturePolicy,
       lastObservedAt: o.observedAt,
     },
     receivedAt,

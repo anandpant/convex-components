@@ -12,33 +12,50 @@ const routes = new Set([
 export type CaptureObservationV1 = {
   schemaVersion: 1;
   pluginVersion: string;
-  redactionVersion: string;
+  /** Historical redacted observations retain their original policy label. */
+  redactionVersion?: string;
+  capturePolicy?: "hook-body-v1";
   destinationId: string;
   instanceId: string;
   pluginBootId: string;
   requestId: string;
   sequence: number;
-  kind: "request" | "response" | "stream_init" | "stream_chunk" | "completion" | "capture_health";
+  kind:
+    | "request"
+    | "request_after_auth"
+    | "response"
+    | "stream_init"
+    | "stream_chunk"
+    | "completion"
+    | "capture_health";
   observedAt: string;
   offsetNs: number;
   route: string;
   configRevision: string;
   sourceFormat?: string;
   requestedModel?: string;
+  executionModel?: string;
+  selectedAuthId?: string;
+  selectedAuthIndex?: string;
+  executionProtocol?: string;
+  metadataOmissions?: string[];
   sourceTraceId?: string;
   correlation?: ExactCorrelation;
   correlationConflicts?: string[];
   stockChunkIndex?: number;
   body?: string;
   observedBodyBytes?: number;
-  bodyFraming?: "stock_json_chunk" | "stock_sse_candidate";
+  bodyFraming?: "stock_json_chunk" | "stock_sse_candidate" | "stock_hook_chunk";
   contentSha256: string;
   contentBytes: number;
   completionOutcome?: string;
   executionStatusCode?: number;
   executionStartedAt?: string;
   executionCompletedAt?: string;
+  /** Exact bounded stock completion diagnostic; private event content. */
   error?: string;
+  errorPresent?: boolean;
+  observedErrorBytes?: number;
   gap?: string;
   bodyFromSequence?: number;
   droppedObservationsTotal?: number;
@@ -92,6 +109,51 @@ export async function validateObservation(
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("observation required");
   const o = value as CaptureObservationV1;
+  const fields = new Set([
+    "schemaVersion",
+    "pluginVersion",
+    "redactionVersion",
+    "capturePolicy",
+    "destinationId",
+    "instanceId",
+    "pluginBootId",
+    "requestId",
+    "sequence",
+    "kind",
+    "observedAt",
+    "offsetNs",
+    "route",
+    "configRevision",
+    "sourceFormat",
+    "requestedModel",
+    "executionModel",
+    "executionProtocol",
+    "selectedAuthId",
+    "selectedAuthIndex",
+    "metadataOmissions",
+    "sourceTraceId",
+    "correlation",
+    "correlationConflicts",
+    "stockChunkIndex",
+    "body",
+    "observedBodyBytes",
+    "bodyFraming",
+    "contentSha256",
+    "contentBytes",
+    "completionOutcome",
+    "executionStatusCode",
+    "executionStartedAt",
+    "executionCompletedAt",
+    "error",
+    "errorPresent",
+    "observedErrorBytes",
+    "gap",
+    "bodyFromSequence",
+    "droppedObservationsTotal",
+    "scopeConflictsTotal",
+  ]);
+  if (Object.keys(o).some((key) => !fields.has(key)))
+    throw new Error("unsupported observation field");
   if (
     o.schemaVersion !== 1 ||
     o.destinationId !== expected.destinationId ||
@@ -119,7 +181,14 @@ export async function validateObservation(
   )
     throw new Error("invalid observation metadata");
   if (
-    !["request", "response", "stream_init", "stream_chunk", "completion"].includes(o.kind) ||
+    ![
+      "request",
+      "request_after_auth",
+      "response",
+      "stream_init",
+      "stream_chunk",
+      "completion",
+    ].includes(o.kind) ||
     !/^[a-f0-9]{64}$/.test(o.contentSha256)
   )
     throw new Error("unsupported observation");
@@ -154,6 +223,10 @@ export async function validateObservation(
     "redactionVersion",
     "sourceFormat",
     "requestedModel",
+    "executionModel",
+    "selectedAuthId",
+    "selectedAuthIndex",
+    "executionProtocol",
     "sourceTraceId",
     "gap",
     "completionOutcome",
@@ -161,7 +234,33 @@ export async function validateObservation(
     if (o[field] !== undefined && (typeof o[field] !== "string" || o[field]!.length > 256))
       throw new Error("invalid optional metadata");
   }
-  if (!o.pluginVersion || !o.redactionVersion) throw new Error("capture versions required");
+  if (!o.pluginVersion || (!o.redactionVersion && o.capturePolicy !== "hook-body-v1"))
+    throw new Error("capture versions required");
+  if (
+    o.capturePolicy !== undefined &&
+    (o.capturePolicy !== "hook-body-v1" || o.redactionVersion !== undefined)
+  )
+    throw new Error("invalid capture policy");
+  if (
+    o.metadataOmissions !== undefined &&
+    (!Array.isArray(o.metadataOmissions) ||
+      o.metadataOmissions.length > 16 ||
+      o.metadataOmissions.some((x) => typeof x !== "string" || x.length > 64))
+  )
+    throw new Error("invalid metadata omissions");
+  if (o.error !== undefined && (typeof o.error !== "string" || o.error.length > 4096))
+    throw new Error("invalid error detail");
+  if (
+    (o.kind === "request_after_auth" || o.bodyFraming === "stock_hook_chunk") &&
+    o.capturePolicy !== "hook-body-v1"
+  )
+    throw new Error("raw hook policy required");
+  if (
+    o.capturePolicy === "hook-body-v1" &&
+    (o.bodyFromSequence !== undefined ||
+      (o.kind === "stream_chunk" && o.bodyFraming !== "stock_hook_chunk"))
+  )
+    throw new Error("raw hook provenance required");
   if (
     o.kind === "completion" &&
     !["succeeded", "failed", "canceled", "rejected"].includes(o.completionOutcome ?? "")
@@ -169,7 +268,7 @@ export async function validateObservation(
     throw new Error("invalid completion outcome");
   if (
     o.bodyFraming !== undefined &&
-    !["stock_json_chunk", "stock_sse_candidate"].includes(o.bodyFraming)
+    !["stock_json_chunk", "stock_sse_candidate", "stock_hook_chunk"].includes(o.bodyFraming)
   )
     throw new Error("invalid body framing");
   if (
@@ -179,6 +278,15 @@ export async function validateObservation(
       o.observedBodyBytes > MAX_ENVELOPE_BYTES)
   )
     throw new Error("invalid observed byte count");
+  if (o.errorPresent !== undefined && typeof o.errorPresent !== "boolean")
+    throw new Error("invalid error presence");
+  if (
+    o.observedErrorBytes !== undefined &&
+    (!Number.isSafeInteger(o.observedErrorBytes) ||
+      o.observedErrorBytes < 0 ||
+      o.observedErrorBytes > MAX_ENVELOPE_BYTES)
+  )
+    throw new Error("invalid observed diagnostic size");
   const body = decodeBody(o);
   if ((await sha256(body)) !== o.contentSha256) throw new Error("content digest mismatch");
   return {

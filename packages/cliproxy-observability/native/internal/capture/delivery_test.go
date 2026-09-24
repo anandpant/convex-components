@@ -25,7 +25,7 @@ func deliveryOutbox(t *testing.T) *Outbox {
 }
 func admitTestEvent(t *testing.T, o *Outbox, destination string, sequence uint64) {
 	t.Helper()
-	e := Observation{SchemaVersion: 1, PluginVersion: Version, RedactionVersion: "framed-json-v1", Destination: destination, Instance: "instance", Boot: "boot", RequestID: "request", Sequence: sequence, Kind: "stream_chunk", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Route: "POST /v1/messages", Revision: "r1", Body: []byte("data: {\"type\":\"ping\"}\n\n")}
+	e := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: CapturePolicy, BodyFraming: "stock_hook_chunk", Destination: destination, Instance: "instance", Boot: "boot", RequestID: "request", Sequence: sequence, Kind: "stream_chunk", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Route: "POST /v1/messages", Revision: "r1", Body: []byte("data: {\"type\":\"ping\"}\n\n")}
 	e.ContentBytes = len(e.Body)
 	e.ContentSHA256 = Digest(e.Body)
 	raw, _ := json.Marshal(e)

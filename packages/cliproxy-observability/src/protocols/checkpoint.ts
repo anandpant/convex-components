@@ -18,6 +18,8 @@ export type ProjectionCheckpoint = {
   terminal?: string;
   usageFinal?: boolean;
   invalid?: boolean;
+  truncated?: boolean;
+  frameLimit?: boolean;
   unsupported?: boolean;
   rawGap?: boolean;
   streamed?: boolean;
@@ -192,6 +194,14 @@ export function applyObservation(
   }
   const body = decodeBody(o);
   const decoder = new TextDecoder("utf-8", { fatal: true });
+  if (o.kind === "request_after_auth" || o.kind === "stream_init") {
+    call.selectedAuthId = o.selectedAuthId;
+    call.selectedAuthIndex = o.selectedAuthIndex;
+  }
+  if (o.kind === "request_after_auth") {
+    call.executionModel = o.executionModel;
+    call.executionProtocol = o.executionProtocol;
+  }
   if (o.kind === "request") {
     state.inputSeen = true;
     if (o.requestedModel) call.requestModel = o.requestedModel.slice(0, 256);
@@ -221,7 +231,9 @@ export function applyObservation(
       }
       if ((o.kind === "stream_chunk" || o.kind === "completion") && body.length) {
         const reader = new SSEReader(state.sse);
-        for (const frame of reader.feed(body, o.observedAt)) {
+        for (const frame of o.bodyFraming === "stock_hook_chunk"
+          ? reader.feedStock(body, call.clientProtocol, o.observedAt)
+          : reader.feed(body, o.observedAt)) {
           if (frame.data === "[DONE]") {
             if (call.clientProtocol === "chat_completions" && state.chatFinished)
               state.terminal = "completed";
@@ -234,13 +246,14 @@ export function applyObservation(
         }
         state.sse = reader.checkpoint();
       }
-    } catch {
+    } catch (error) {
       state.invalid = true;
+      if (error instanceof Error && error.message === "SSE frame limit") state.frameLimit = true;
     }
   }
   if (o.kind === "completion") {
     try {
-      if (new SSEReader(state.sse).finish().truncated) state.invalid = true;
+      if (new SSEReader(state.sse).finish().truncated) state.truncated = true;
     } catch {
       state.invalid = true;
     }
@@ -275,7 +288,12 @@ export function applyObservation(
   }
   call.protocolTerminal = state.terminal;
   const final =
-    !!state.terminal && state.usageFinal && !state.invalid && !state.unsupported && !state.rawGap;
+    !!state.terminal &&
+    state.usageFinal &&
+    !state.invalid &&
+    !state.truncated &&
+    !state.unsupported &&
+    !state.rawGap;
   const projection: CliproxyProjection = {
     version: 1,
     protocol: call.clientProtocol ?? "unknown",
@@ -331,12 +349,23 @@ export function applyObservation(
   call.capture.persistedThroughSequence = o.sequence;
   call.capture.raw =
     call.capture.terminalSequence === o.sequence && !state.rawGap ? "complete" : "partial";
+  call.capture.projectionIssue = state.frameLimit
+    ? "frame_limit"
+    : state.invalid
+      ? "malformed_payload"
+      : state.truncated
+        ? "truncated_frame"
+        : state.unsupported
+          ? "unsupported_protocol"
+          : undefined;
   call.capture.projection = state.invalid
     ? "invalid"
-    : state.unsupported
-      ? "unsupported"
-      : state.terminal
-        ? "complete"
-        : "partial";
+    : state.truncated
+      ? "partial"
+      : state.unsupported
+        ? "unsupported"
+        : state.terminal
+          ? "complete"
+          : "partial";
   call.capture.usage = call.usage.length ? (final ? "complete" : "partial") : "unavailable";
 }

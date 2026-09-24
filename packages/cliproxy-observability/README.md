@@ -29,7 +29,9 @@ The receiver accepts `CaptureSegmentV1` from the `/capture` export: immutable ND
 - `ModelCallV1` is the common read contract. `fromOpenRouterSpan` is a structural adapter with no runtime dependency on the OpenRouter component. `fromLegacyCliproxySpan` labels historical rows distinctly.
 - Gateway identity is known. Selected provider, attempt detail and OAuth cost are unknown unless supported evidence exists. Pre-hook capture is unavailable; previews are not enrolled.
 
-`projectCapturedPayloads` reconstructs selected-call content from bounded pages. Its 16 MiB replay limit is a read-operation bound, not a retention limit. Larger calls remain available through raw event pages. Summary checkpoints retain scalar state and private references for large unfinished frames; immutable segments retain text, reasoning, tools and native usage snapshots.
+For `capturePolicy: hook-body-v1`, decode each observation body from base64 and verify `contentBytes`/`contentSha256` before presenting it. Keep callbacks separate for raw evidence; their bytes may be partial JSON or UTF-8. `request_after_auth` is executed-request evidence, not the original client request. `executionModel`, `executionProtocol`, `selectedAuthId` and `selectedAuthIndex` are exact stock fields, not inferred provider or attempt identities. Header collections and opaque auth metadata are excluded. Model payload content is unredacted and must remain private.
+
+`projectCapturedPayloads` reconstructs selected-call content from bounded pages. Pass `stockHookChunks: true` only for the new hook-body policy; historical observations already contain canonical framing. Its 16 MiB replay limit is a read-operation bound, not a retention limit. Larger calls remain available through raw event pages. Summary checkpoints retain scalar state and private references for large unfinished frames; immutable segments retain text, reasoning, tools and native usage snapshots.
 
 ## Parser provenance
 

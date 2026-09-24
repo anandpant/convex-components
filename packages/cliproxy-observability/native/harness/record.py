@@ -23,7 +23,7 @@ key=private['apiKey'];base=private['baseURL'].rstrip('/')
 stock=proof.config(True).replace('http://127.0.0.1:8316/v1',base).replace('harmless-upstream-test-key',key).replace('proof-model','gpt-5.6-luna')
 # Disable request logging; these stock stdout logs contain only startup and request status.
 (root/'stock.yaml').write_text(stock);(root/'stock.yaml').chmod(0o600)
-scope={'enabled':True,'instanceId':'isolated-real-recording','revision':'proof-v1','socket':str(root/'outbox/capture.sock'),'bindings':[{'key':proof.DEV,'destinationId':'harness-dev','deployment':proof.DEPLOYMENT,'environment':'dev'}],'redactions':[key]}
+scope={'enabled':True,'instanceId':'isolated-real-recording','revision':'proof-v1','socket':str(root/'outbox/capture.sock'),'bindings':[{'key':proof.DEV,'destinationId':'harness-dev','deployment':proof.DEPLOYMENT,'environment':'dev'}]}
 (root/'capture.json').write_text(json.dumps(scope));(root/'capture.json').chmod(0o600)
 (root/'nginx.conf').write_text(proof.nginx_config())
 processes=[]
@@ -44,7 +44,7 @@ try:
         conn=http.client.HTTPConnection('127.0.0.1',8318,timeout=120)
         started=time.perf_counter();conn.request('POST',route,json.dumps(data),{'Authorization':'Bearer '+proof.DEV,'X-Meshix-Deployment':proof.DEPLOYMENT,'Content-Type':'application/json'})
         res=conn.getresponse();status=res.status
-        # Downstream bytes are never written to disk; only the plugin's sanitized outbox is exported.
+        # Downstream bytes are never written to disk; only the private hook-body outbox is exported after the scan below.
         if canceled:
             while True:
                 line=res.readline()
@@ -71,7 +71,7 @@ try:
         for event in call:
             payload=base64.b64decode(event.get('body',''))
             if key.encode() in payload or proof.DEV.encode() in payload or re.search(rb'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',payload):raise RuntimeError('fixture secret/account scan failed')
-        fixture={'provenance':{'kind':'real_provider_recording','recordedAt':call[0]['observedAt'],'sourceProtocol':protocol,'requestedModel':'gpt-5.6-luna','selectedUpstreamProvider':'unknown','topology':'isolated official stock 7.3.5 -> existing dev gateway -> existing OAuth owner; no copied OAuth state','stockSHA256':hashlib.sha256(Path('/stock/cli-proxy-api').read_bytes()).hexdigest(),'pluginSHA256':hashlib.sha256(Path('/capture/cliproxy-capture.so').read_bytes()).hexdigest(),'pluginVersion':'0.1.0','redactionVersion':call[0]['redactionVersion'],'scenario':'client_cancellation_after_first_data' if canceled else 'success','durationMs':elapsed,'downstreamStatus':status,'eventsSHA256':hashlib.sha256(json.dumps(call,separators=(',',':')).encode()).hexdigest()},'events':call}
+        fixture={'provenance':{'kind':'real_provider_recording','recordedAt':call[0]['observedAt'],'sourceProtocol':protocol,'requestedModel':'gpt-5.6-luna','selectedUpstreamProvider':'unknown','topology':'isolated official stock 7.3.5 -> existing dev gateway -> existing OAuth owner; no copied OAuth state','stockSHA256':hashlib.sha256(Path('/stock/cli-proxy-api').read_bytes()).hexdigest(),'pluginSHA256':hashlib.sha256(Path('/capture/cliproxy-capture.so').read_bytes()).hexdigest(),'pluginVersion':call[0]['pluginVersion'],'capturePolicy':call[0]['capturePolicy'],'scenario':'client_cancellation_after_first_data' if canceled else 'success','durationMs':elapsed,'downstreamStatus':status,'eventsSHA256':hashlib.sha256(json.dumps(call,separators=(',',':')).encode()).hexdigest()},'events':call}
         output=Path('/recordings')/(protocol+'.json');output.write_text(json.dumps(fixture,indent=2)+'\n')
         records.append({'protocol':protocol,'observations':len(call),'durationMs':elapsed,'fixtureSHA256':hashlib.sha256(output.read_bytes()).hexdigest()})
     print(json.dumps({'realRecordings':records},indent=2))

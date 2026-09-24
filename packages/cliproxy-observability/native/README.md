@@ -1,8 +1,8 @@
 # Stock CLIProxy capture
 
-Go native capture for official CLIProxyAPI 7.3.5, ABI 1 / RPC schema 6. The serving binary is unmodified and hash-verified. TypeScript in the component owns protocol normalization; the plugin scopes and timestamps exact hook-body observations.
+Go native capture for official CLIProxyAPI, ABI 1 / RPC schema 6. Release 0.2.0 was built and packaged against 7.3.5; [additional 7.3.15 compatibility](host-compatibility.md) is qualified separately for the unchanged Linux amd64 artifacts. The serving binary is unmodified and hash-verified. TypeScript in the component owns protocol normalization; the plugin scopes and timestamps exact hook-body observations.
 
-This source is a release candidate. Live installation requires the separately owned Meshix receiver and my-nix deployment, closure of the device-endpoint bypass, resource preflight and DEV verification before production enrollment.
+Live installation requires the separately owned Meshix receiver and my-nix deployment, closure of the device-endpoint bypass, resource preflight and DEV verification before production enrollment.
 
 ## Capture and durability
 
@@ -32,7 +32,7 @@ Transport header collections, cookies and opaque stock metadata are never persis
 
 Stock hooks run before final framing and are not downstream wire bytes or proof of client receipt. Stream observations use `bodyFraming: stock_hook_chunk`, preserving callback sequence and byte count. Responses may deliver separate event/data lines; Chat may deliver raw JSON. The receiver derives frames for projection without changing stored observations. First-body timing uses observed byte presence; semantic timing uses a complete decoded event. Malformed/truncated/frame-limit projection is separate from raw capture completeness. Historical redacted observations retain their original policy labels and framing.
 
-After-auth observations record the exact executed request body, `executionModel` and `executionProtocol`; selected auth ID/index come only from the pinned host's selected-auth scalars. Repeated after-auth callbacks remain separate observations, not invented attempt records. Summary execution fields describe the last observed selection. Missing scalar metadata stays absent.
+After-auth observations record the body at that hook, `executionModel` and `executionProtocol`; selected auth ID/index come only from the host's selected-auth scalars. They are not necessarily the final upstream request. For example, the 7.3.15 Claude executor can subsequently wrap user text in a content block and add ephemeral cache control. Native continuation fixtures preserved signed/opaque assistant blocks, but that does not establish parity for every later transformation or live provider acceptance. Repeated after-auth callbacks remain separate observations, not invented attempt records. Summary execution fields describe the last observed selection. Missing scalar metadata stays absent.
 
 Boot-health counters have plugin-boot scope and must not be summed across destinations. Incomplete prior-boot calls read as unknown, not inferred success/failure. Pre-hook failures, actual selected provider/auth type, upstream attempts and OAuth cost remain unavailable.
 

@@ -84,7 +84,15 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 	if r.bufferedBytes() == 0 {
 		r.first = seq
 	}
-	if len(r.pending)+len(body) > MaxBody {
+	// The pinned stock Responses path can deliver Scanner.Bytes() event/data
+	// lines separately, before its HTTP framer restores their line boundary.
+	// Restore only this metadata-to-data boundary, never one inside JSON.
+	lineBreak := stream && r.allowUndelimited && responsesEventDataBoundary(r.pending, body)
+	frameBytes := len(r.pending) + len(body)
+	if lineBreak {
+		frameBytes++
+	}
+	if frameBytes > MaxBody {
 		r.pending = nil
 		return nil, nil, "redaction_frame_limit"
 	}
@@ -101,6 +109,9 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 			r.first = seq + 1
 		}
 		return out, &first, gap
+	}
+	if lineBreak {
+		r.pending = append(r.pending, '\n')
 	}
 	r.pending = append(r.pending, body...)
 	if !stream {
@@ -174,6 +185,11 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 		}
 		out = append(out, safe...)
 	}
+	// A complete undelimited candidate may be followed by its separator in a
+	// later callback. Whitespace alone is not a truncated event.
+	if r.allowUndelimited && len(bytes.TrimSpace(r.pending)) == 0 {
+		r.pending = nil
+	}
 	if len(r.pending) == 0 && len(r.semantic.frames) == 0 {
 		r.pending = nil
 		r.first = seq + 1
@@ -198,6 +214,14 @@ func (r *FrameRedactor) Feed(body []byte, seq uint64, stream, terminal bool, sec
 		return nil, nil, "redacted_body_limit"
 	}
 	return out, &first, gap
+}
+
+func responsesEventDataBoundary(pending, body []byte) bool {
+	if !bytes.HasPrefix(pending, []byte("event:")) || !bytes.HasPrefix(body, []byte("data:")) || bytes.ContainsAny(pending, "\r\n") {
+		return false
+	}
+	event := strings.TrimSpace(string(pending[len("event:"):]))
+	return len(event) < 128 && identifier.MatchString(event)
 }
 
 // Responses hooks precede the stock SSE framer; complete candidate events can lack a delimiter.

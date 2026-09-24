@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Preserve recorded selected-auth identity when stream initialization omits auth metadata. Explicit selections still replace the pair; new after-auth events retain unknown fields rather than inheriting a previous selection.
+- Preserve supplied tool-input objects when Messages stream argument deltas contain zero characters. Missing initial input and malformed or truncated nonempty arguments remain diagnostic.
+- Native plugin/exporter source and the native reported version (0.2.0), capture schema, and ABI are unchanged. Updating the npm package does not require a native host upgrade or rewrite historical summaries.
+
 ## 0.2.0
 
 - Preserve exact bounded hook payload bytes with `hook-body-v1`; remove native content redaction and semantic withholding.

@@ -139,17 +139,12 @@ func (e *Engine) controlWorker(ctx context.Context, pipe *capturePipe) {
 	}, MaxConnsPerHost: 1}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	secrets := append([]string{}, e.config.Redactions...)
-	for _, binding := range e.config.Bindings {
-		secrets = append(secrets, binding.Key)
-	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case q := <-pipe.control:
 			o := q.o
-			redactMetadata(&o, secrets)
 			o.DroppedObservations = e.dropped.Load()
 			o.ScopeConflicts = e.conflicts.Load()
 			raw, _ := json.Marshal(o)

@@ -17,7 +17,7 @@ cp packages/cliproxy-observability/native/plugin/UPSTREAM-LICENSE "$output/paylo
 node --input-type=module - "$output/payload/manifest.json" "$version" "$architecture" "$(git rev-parse HEAD)" <<'JS'
 import { writeFileSync } from "node:fs";
 const [path,version,architecture,sourceCommit]=process.argv.slice(2);
-writeFileSync(path,JSON.stringify({schemaVersion:1,version,architecture,sourceCommit,stockVersion:"7.3.5",stockBinarySHA256:architecture==="amd64"?"de7a84f665c19e5f991d15faa577436472b44a4dd013eb1c31fe2dae0befc26c":"79766341173c68f9df506fdb9d0b3e1277a7adc58c925812ca0bcc0ecd7af30f",stockCommit:"b681a1e0f7b89d26814f788b60bf84feaf72e912",pluginABI:1,rpcSchema:6,redactionVersion:"framed-json-v2",goBuildImage:"golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d",platform:"linux",libc:"glibc-2.36-or-newer"},null,2)+"\n");
+writeFileSync(path,JSON.stringify({schemaVersion:1,version,architecture,sourceCommit,stockVersion:"7.3.5",stockBinarySHA256:architecture==="amd64"?"de7a84f665c19e5f991d15faa577436472b44a4dd013eb1c31fe2dae0befc26c":"79766341173c68f9df506fdb9d0b3e1277a7adc58c925812ca0bcc0ecd7af30f",stockCommit:"b681a1e0f7b89d26814f788b60bf84feaf72e912",pluginABI:1,rpcSchema:6,capturePolicy:"hook-body-v1",goBuildImage:"golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d",platform:"linux",libc:"glibc-2.36-or-newer"},null,2)+"\n");
 JS
 epoch=$(git show -s --format=%ct HEAD)
 python3 - "$output" "$version" "$architecture" "$epoch" <<'PYTHON'

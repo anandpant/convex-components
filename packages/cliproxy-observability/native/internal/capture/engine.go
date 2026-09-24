@@ -15,15 +15,19 @@ import (
 )
 
 type Hook struct {
-	RequestID, TraceID, SourceFormat, RequestedModel, Model string
-	Headers, RequestHeaders                                 http.Header
-	Body                                                    json.RawMessage
-	Stream                                                  bool
-	ChunkIndex                                              int
-	Outcome                                                 string
-	StatusCode                                              int
-	StartedAt, CompletedAt                                  string
-	Error                                                   string
+	RequestID, TraceID, SourceFormat, ToFormat, RequestedModel, Model string
+	Headers, RequestHeaders                                           http.Header
+	Body                                                              json.RawMessage
+	Stream                                                            bool
+	ChunkIndex                                                        int
+	Outcome                                                           string
+	StatusCode                                                        int
+	StartedAt, CompletedAt                                            string
+	Metadata                                                          struct {
+		SelectedAuthID    json.RawMessage `json:"selected_auth_id"`
+		SelectedAuthIndex json.RawMessage `json:"selected_auth_index"`
+	}
+	Error string
 }
 type scopeState struct {
 	binding              Binding
@@ -35,19 +39,16 @@ type scopeState struct {
 	correlation          map[string]string
 	conflicts            []string
 	trace, format, model string
-	stream               bool
 }
 type queued struct {
-	o      Observation
-	size   int
-	stream bool
+	o    Observation
+	size int
 }
 type capturePipe struct {
-	queue       chan queued
-	control     chan queued
-	bytes       atomic.Int64
-	budget      int
-	activeLimit int
+	queue   chan queued
+	control chan queued
+	bytes   atomic.Int64
+	budget  int
 }
 type Engine struct {
 	config       Config
@@ -78,7 +79,7 @@ func NewEngine(c Config) *Engine {
 	e := &Engine{config: c, boot: BootID(), scopes: map[string]*scopeState{}, pipes: map[string]*capturePipe{}, started: time.Now().UTC().Format(time.RFC3339Nano), healthDone: make(chan struct{}), cancel: cancel, done: make(chan struct{})}
 	var workers sync.WaitGroup
 	for destination := range destinations {
-		pipe := &capturePipe{queue: make(chan queued, max(1, 1024/count)), control: make(chan queued, max(1, 128/count)), budget: c.QueueBytes / count, activeLimit: max(1, c.MaxActive/count)}
+		pipe := &capturePipe{queue: make(chan queued, max(1, 1024/count)), control: make(chan queued, max(1, 128/count)), budget: c.QueueBytes / count}
 		e.pipes[destination] = pipe
 		workers.Add(2)
 		go func() { defer workers.Done(); e.worker(ctx, pipe) }()
@@ -107,7 +108,7 @@ func (e *Engine) Observe(method string, raw []byte) {
 		return
 	}
 	if len(h.RequestedModel) > 256 {
-		h.RequestedModel = "[oversized model withheld]"
+		h.RequestedModel = ""
 	}
 	if len(h.TraceID) > 256 {
 		h.TraceID = ""
@@ -123,6 +124,8 @@ func (e *Engine) Observe(method string, raw []byte) {
 	switch method {
 	case "request.intercept_before":
 		kind = "request"
+	case "request.intercept_after":
+		kind = "request_after_auth"
 	case "response.intercept_after":
 		kind = "response"
 	case "response.intercept_stream_chunk":
@@ -161,7 +164,7 @@ func (e *Engine) Observe(method string, raw []byte) {
 			e.dropped.Add(1)
 			return
 		}
-		s = &scopeState{binding: b, route: route, start: now, last: now, correlation: map[string]string{}, trace: h.TraceID, format: h.SourceFormat, model: h.RequestedModel, stream: h.Stream}
+		s = &scopeState{binding: b, route: route, start: now, last: now, correlation: map[string]string{}, trace: h.TraceID, format: h.SourceFormat, model: h.RequestedModel}
 		for header, field := range map[string]string{"X-Meshix-Request-Id": "requestId", "X-Meshix-Run-Id": "runId", "X-Meshix-Job-Id": "jobId", "X-Meshix-Trace-Id": "traceId", "X-Opencode-Session-Id": "opencodeSessionId", "X-Meshix-Root-Execution-Id": "rootExecutionId", "X-Meshix-Operation-Id": "operationId", "X-Meshix-Step-Id": "stepId", "X-Meshix-Part-Id": "partId", "X-Meshix-Attempt-Id": "attemptId"} {
 			v, ok := ExactlyOne(headers, header)
 			if ok && len(v) <= 256 {
@@ -182,8 +185,25 @@ func (e *Engine) Observe(method string, raw []byte) {
 	s.last = now
 	e.observations.Add(1)
 	s.sequence++
-	o := Observation{SchemaVersion: 1, PluginVersion: Version, RedactionVersion: "framed-json-v2", Destination: s.binding.Destination, Instance: e.config.Instance, Boot: e.boot, RequestID: h.RequestID, Sequence: s.sequence, Kind: kind, ObservedAt: now.UTC().Format(time.RFC3339Nano), OffsetNS: now.Sub(s.start).Nanoseconds(), Route: s.route, Revision: e.config.Revision, SourceFormat: s.format, Model: s.model, TraceID: s.trace, Correlation: maps.Clone(s.correlation), CorrelationConflicts: s.conflicts}
+	o := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: CapturePolicy, Destination: s.binding.Destination, Instance: e.config.Instance, Boot: e.boot, RequestID: h.RequestID, Sequence: s.sequence, Kind: kind, ObservedAt: now.UTC().Format(time.RFC3339Nano), OffsetNS: now.Sub(s.start).Nanoseconds(), Route: s.route, Revision: e.config.Revision, SourceFormat: s.format, Model: s.model, TraceID: s.trace, Correlation: maps.Clone(s.correlation), CorrelationConflicts: append([]string(nil), s.conflicts...)}
+	if kind == "request_after_auth" {
+		if len(h.Model) <= 256 {
+			o.ExecutionModel = h.Model
+		} else {
+			o.MetadataOmissions = append(o.MetadataOmissions, "executionModel:limit")
+		}
+		if len(h.ToFormat) <= 64 {
+			o.ExecutionProtocol = h.ToFormat
+		} else {
+			o.MetadataOmissions = append(o.MetadataOmissions, "executionProtocol:limit")
+		}
+	}
+	if kind == "request_after_auth" || kind == "stream_init" {
+		o.SelectedAuthID = metadataIdentity(h.Metadata.SelectedAuthID, "selectedAuthId", &o)
+		o.SelectedAuthIndex = metadataIdentity(h.Metadata.SelectedAuthIndex, "selectedAuthIndex", &o)
+	}
 	if kind == "stream_chunk" {
+		o.BodyFraming = "stock_hook_chunk"
 		index := h.ChunkIndex
 		o.ChunkIndex = &index
 	}
@@ -193,14 +213,21 @@ func (e *Engine) Observe(method string, raw []byte) {
 		o.StartedAt = h.StartedAt
 		o.CompletedAt = h.CompletedAt
 		if h.Error != "" {
-			o.Error = "[stock error text withheld]"
+			o.ErrorPresent = true
+			o.ObservedErrorBytes = len(h.Error)
+			if len(h.Error) <= 4096 {
+				o.Error = h.Error
+			} else {
+				o.MetadataOmissions = append(o.MetadataOmissions, "error:limit")
+				o.Gap = "diagnostic_text_limit"
+			}
 		}
 		delete(e.scopes, h.RequestID)
 	}
 	if kind == "response" {
 		o.StatusCode = h.StatusCode
 	}
-	if kind == "request" || kind == "response" || kind == "stream_chunk" {
+	if kind == "request" || kind == "request_after_auth" || kind == "response" || kind == "stream_chunk" {
 		if len(h.Body) > 0 && json.Unmarshal(h.Body, &o.Body) != nil {
 			o.Gap = "invalid_body_encoding"
 		}
@@ -210,11 +237,12 @@ func (e *Engine) Observe(method string, raw []byte) {
 			o.Gap = "observation_body_limit"
 		}
 	}
+	excludeCredentialMetadata(&o, e.config.Bindings)
 	if s.captureLost {
 		o.Body = nil
 		o.Gap = "prior_capture_gap"
 	}
-	size := len(o.Body) + 8192
+	size := len(o.Body) + len(o.Error) + 8192
 	pipe := e.pipes[o.Destination]
 	if pipe.bytes.Load()+int64(size) > int64(pipe.budget) {
 		s.captureLost = true
@@ -224,7 +252,7 @@ func (e *Engine) Observe(method string, raw []byte) {
 	e.bytes.Add(int64(size))
 	pipe.bytes.Add(int64(size))
 	select {
-	case pipe.queue <- queued{o, size, s.stream}:
+	case pipe.queue <- queued{o, size}:
 	default:
 		e.bytes.Add(-int64(size))
 		pipe.bytes.Add(-int64(size))
@@ -238,83 +266,12 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 	}, MaxConnsPerHost: 1}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	redactors := map[string]*FrameRedactor{}
-	redactorLast := map[string]time.Time{}
-	cleanup := time.NewTicker(time.Minute)
-	defer cleanup.Stop()
-	redactorBytes := 0
-	secrets := append([]string{}, e.config.Redactions...)
-	for _, b := range e.config.Bindings {
-		secrets = append(secrets, b.Key)
-	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-cleanup.C:
-			for id, last := range redactorLast {
-				if time.Since(last) > 24*time.Hour {
-					redactorBytes -= redactors[id].bufferedBytes()
-					delete(redactors, id)
-					delete(redactorLast, id)
-				}
-			}
 		case q := <-pipe.queue:
 			o := q.o
-			if o.Kind == "stream_chunk" || o.Kind == "completion" {
-				r := redactors[o.RequestID]
-				if r == nil {
-					if len(redactors) >= pipe.activeLimit {
-						o.Body = nil
-						o.Gap = "redaction_state_limit"
-					}
-					r = &FrameRedactor{allowUndelimited: o.Route == "POST /v1/responses", allowJSON: o.Route == "POST /v1/chat/completions"}
-					if len(redactors) < pipe.activeLimit {
-						redactors[o.RequestID] = r
-						redactorLast[o.RequestID] = time.Now()
-					}
-				}
-				if _, ok := redactors[o.RequestID]; ok {
-					redactorLast[o.RequestID] = time.Now()
-				}
-				redactorBytes -= r.bufferedBytes()
-				if o.Gap != "" {
-					r.pending = nil
-					r.semantic = semanticRedactor{failed: true}
-					o.Body = nil
-				}
-				if redactorBytes+r.bufferedBytes()+len(o.Body) > pipe.budget {
-					r.pending = nil
-					r.semantic = semanticRedactor{failed: true}
-					o.Body = nil
-					o.Gap = "redaction_memory_limit"
-				}
-				if r.allowJSON && len(o.Body) > 0 && o.Body[0] == '{' && json.Valid(o.Body) {
-					o.BodyFraming = "stock_json_chunk"
-				} else {
-					o.BodyFraming = "stock_sse_candidate"
-				}
-				b, from, gap := r.Feed(o.Body, o.Sequence, true, o.Kind == "completion", secrets)
-				redactorBytes += r.bufferedBytes()
-				o.Body = b
-				o.BodyFromSequence = from
-				if gap != "" {
-					o.Gap = gap
-				}
-				if o.Kind == "completion" {
-					delete(redactors, o.RequestID)
-					delete(redactorLast, o.RequestID)
-				}
-			} else if len(o.Body) > 0 {
-				r := FrameRedactor{}
-				b, _, gap := r.Feed(o.Body, o.Sequence, false, true, secrets)
-				o.Body = b
-				if gap != "" {
-					o.Gap = gap
-				}
-			}
-			// Only allowlisted metadata was retained; scrub known values there as well.
-			redactMetadata(&o, secrets)
 			o.DroppedObservations = e.dropped.Load()
 			o.ScopeConflicts = e.conflicts.Load()
 			o.ContentBytes = len(o.Body)

@@ -135,6 +135,92 @@ it("commits raw independently, deduplicates exact retries, and projects from own
   expect(page.done).toBe(true);
   expect(await s.backend.run((ctx) => ctx.db.query("receipts").collect())).toHaveLength(1);
 });
+it("persists unmodified hook NDJSON and projects line callbacks across separate segments", async () => {
+  const s = setup();
+  const terminal = {
+    type: "response.completed",
+    response: {
+      object: "response",
+      id: "synthetic",
+      model: "reported",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    },
+  };
+  const bodies = [
+    ' { "stream":true, "token":"content", "image":{"url":"data:image/png;base64,aGVsbG8="} } ',
+    '{"secret":"executed tool argument"}',
+    "event: response.completed",
+    "data: " + JSON.stringify(terminal),
+    "",
+  ];
+  const observations: CaptureObservationV1[] = [];
+  for (const [index, body] of bodies.entries()) {
+    const bytes = encode.encode(body);
+    const o: CaptureObservationV1 = {
+      ...events[0]!,
+      redactionVersion: undefined,
+      capturePolicy: "hook-body-v1",
+      pluginVersion: "0.2.0",
+      route: "POST /v1/responses",
+      sourceFormat: "openai-response",
+      sequence: index + 1,
+      kind:
+        index === 0
+          ? "request"
+          : index === 1
+            ? "request_after_auth"
+            : index === 4
+              ? "completion"
+              : "stream_chunk",
+      body: btoa(String.fromCharCode(...bytes)),
+      contentBytes: bytes.length,
+      contentSha256: await sha256(bytes),
+      ...(index === 1
+        ? {
+            executionModel: "selected",
+            executionProtocol: "openai-response",
+            selectedAuthId: "auth-id",
+            selectedAuthIndex: "auth-index",
+          }
+        : {}),
+      ...(index === 2 || index === 3
+        ? { bodyFraming: "stock_hook_chunk", stockChunkIndex: index - 2 }
+        : {}),
+      ...(index === 4 ? { completionOutcome: "succeeded" } : {}),
+    };
+    observations.push(o);
+    const segment = await envelope([o]);
+    expect((await s.post(segment)).status).toBe(200);
+    const callId = await callIdentity(o);
+    expect(await projectPendingSegments(s.ctx, { ...s.options, callId })).toMatchObject({
+      progressed: true,
+    });
+    expect(
+      [...s.blobs.values()].some(
+        (raw) => new TextDecoder().decode(raw) === JSON.stringify(o) + "\n",
+      ),
+    ).toBe(true);
+  }
+  const callId = await callIdentity(observations[0]!);
+  const stored = await s.backend.query(api.queries.getCall, {
+    destinationId: s.options.destinationId,
+    callId,
+  });
+  expect(JSON.parse(stored!.summaryJson)).toMatchObject({
+    state: "succeeded",
+    totalTokens: 10,
+    executionModel: "selected",
+    selectedAuthId: "auth-id",
+    capture: {
+      raw: "complete",
+      projection: "complete",
+      usage: "complete",
+      capturePolicy: "hook-body-v1",
+    },
+  });
+});
 it("rejects changed content under the same sequence identity", async () => {
   const s = setup();
   expect((await s.post(await envelope())).status).toBe(200);

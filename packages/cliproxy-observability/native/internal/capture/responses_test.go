@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -16,7 +15,7 @@ import (
 
 // Exercise the public hook adapter and its worker, including route selection,
 // callback sequencing, framing metadata and the serialized Unix-socket output.
-func captureResponsesCallbacks(t *testing.T, callbacks []string) []Observation {
+func captureHookBodies(t *testing.T, request, afterAuth string, callbacks []string, diagnostics ...string) []Observation {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "capture-sse-")
 	if err != nil {
@@ -26,8 +25,7 @@ func captureResponsesCallbacks(t *testing.T, callbacks []string) []Observation {
 	c := testConfig()
 	c.Socket = filepath.Join(dir, "capture.sock")
 	c.QueueBytes = 8 << 20
-	c.Redactions = []string{"secret-value"}
-	delivered := make(chan Observation, len(callbacks)+2)
+	delivered := make(chan Observation, len(callbacks)+3)
 	listener, err := net.Listen("unix", c.Socket)
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +39,9 @@ func captureResponsesCallbacks(t *testing.T, callbacks []string) []Observation {
 		if err != nil {
 			t.Error(err)
 			return
+		}
+		if bytes.Contains(raw, []byte("cookie-transport-only")) || bytes.Contains(raw, []byte("opaque-auth-secret")) {
+			t.Error("transport credential metadata persisted")
 		}
 		var o Observation
 		if err := json.Unmarshal(raw, &o); err != nil {
@@ -56,6 +57,7 @@ func captureResponsesCallbacks(t *testing.T, callbacks []string) []Observation {
 	defer e.Close()
 	headers := testHeaders()
 	headers.Set("X-Meshix-Capture-Route", "POST /v1/responses")
+	headers.Set("Cookie", "session=cookie-transport-only")
 	hook := Hook{RequestID: "synthetic-responses", Headers: headers, SourceFormat: "openai-response", Stream: true}
 	observe := func(method string, body string) {
 		t.Helper()
@@ -64,14 +66,27 @@ func captureResponsesCallbacks(t *testing.T, callbacks []string) []Observation {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The host metadata bag can contain credential material. Only the two
+		// explicitly typed selected-auth scalars may enter the observation.
+		raw = bytes.Replace(raw, []byte(`"Metadata":{`), []byte(`"Metadata":{"credentials":{"password":"opaque-auth-secret"},`), 1)
 		e.Observe(method, raw)
 	}
-	observe("request.intercept_before", `{"stream":true}`)
+	observe("request.intercept_before", request)
+	if afterAuth != "" {
+		hook.Model, hook.ToFormat = "executed-model", "openai-response"
+		hook.Metadata.SelectedAuthID = json.RawMessage(`"selected-id"`)
+		hook.Metadata.SelectedAuthIndex = json.RawMessage(`"selected-index"`)
+		observe("request.intercept_after", afterAuth)
+	}
 	for i, body := range callbacks {
 		hook.ChunkIndex = i
 		observe("response.intercept_stream_chunk", body)
 	}
-	hook.Outcome, hook.StatusCode = "success", 200
+	hook.Outcome, hook.StatusCode = "succeeded", 200
+	hook.Error = "diagnostic token secret text"
+	if len(diagnostics) > 0 {
+		hook.Error = diagnostics[0]
+	}
 	observe("request.complete", "")
 	var observations []Observation
 	timeout := time.NewTimer(5 * time.Second)
@@ -84,6 +99,9 @@ func captureResponsesCallbacks(t *testing.T, callbacks []string) []Observation {
 			}
 			observations = append(observations, o)
 			if o.Kind == "completion" {
+				if !o.ErrorPresent || (len(hook.Error) <= 4096 && o.Error != hook.Error) || (len(hook.Error) > 4096 && (o.Error != "" || len(o.MetadataOmissions) == 0)) {
+					t.Fatal("recorded diagnostic changed")
+				}
 				return observations
 			}
 		case <-timeout.C:
@@ -92,129 +110,70 @@ func captureResponsesCallbacks(t *testing.T, callbacks []string) []Observation {
 	}
 }
 
-func TestResponsesStockScannerCallbacks(t *testing.T) {
-	// CLIProxyAPI b681a1e0 codex_executor_stream.go scans lines, translates
-	// them, then handlers_stream.go invokes hooks before responsesSSEFramer.
-	const wire = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic\"}}\n\n" +
-		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}\n\n"
+func TestHookContentFidelity(t *testing.T) {
+	request := ` { "stream":true, "token":"ordinary-word", "secret":"user-content", "authorization":"quoted-example", "url":"https://example.test/?token=keep", "nested":"{\"api_key\":\"example\"}", "image":{"type":"image_url","url":"data:image/png;base64,aGVsbG8="} } `
+	after := `{"model":"executed-model","tools":[{"name":"secret","arguments":{"password":"example"}}]}`
+	callbacks := []string{"event: response.created", `data: {"type":"response.created","response":{"id":"synthetic"}}`, "", "event: response.output_text.delta", `data: {"type":"response.output_text.delta","delta":"secret-"}`, "event: response.output_text.delta", `data: {"type":"response.output_text.delta","delta":"value"}`, `data: {"arguments":"{\"api_"}`, `data: {"arguments":"key\":\"keep\"}"}`, "event: response.completed", `data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3}}}`}
+	observations := captureHookBodies(t, request, after, callbacks)
+	if string(observations[0].Body) != request || string(observations[1].Body) != after {
+		t.Fatal("request bytes changed")
+	}
+	if observations[1].Kind != "request_after_auth" || observations[1].ExecutionModel != "executed-model" || observations[1].ExecutionProtocol != "openai-response" || observations[1].SelectedAuthID != "selected-id" || observations[1].SelectedAuthIndex != "selected-index" {
+		t.Fatal("after-auth evidence missing")
+	}
+	for i, o := range observations[2 : len(observations)-1] {
+		if string(o.Body) != callbacks[i] || o.BodyFraming != "stock_hook_chunk" || o.ChunkIndex == nil || *o.ChunkIndex != i || o.ObservedBodyBytes != len(callbacks[i]) || o.Gap != "" || o.CapturePolicy != CapturePolicy {
+			t.Fatalf("callback %d changed", i)
+		}
+	}
+}
+
+func TestHookRetainsEverySplitAndMalformedBytes(t *testing.T) {
+	frame := "event: response.output_text.delta\r\ndata: {\"delta\":\"é token secret data: field\"}\r\n\r\n"
 	var callbacks []string
-	scanner := bufio.NewScanner(strings.NewReader(wire))
-	for scanner.Scan() {
-		callbacks = append(callbacks, scanner.Text())
+	for split := 0; split <= len(frame); split++ {
+		callbacks = append(callbacks, frame[:split], frame[split:])
 	}
-	if err := scanner.Err(); err != nil {
-		t.Fatal(err)
-	}
-	observations := captureResponsesCallbacks(t, callbacks)
-	var retained []byte
-	for _, o := range observations[1:] {
-		if o.Gap != "" || o.BodyFraming != "stock_sse_candidate" {
-			t.Fatalf("unexpected gap/framing: %s %s", o.Gap, o.BodyFraming)
-		}
-		if o.Kind == "stream_chunk" && (o.ChunkIndex == nil || o.ObservedBodyBytes != len(callbacks[*o.ChunkIndex])) {
-			t.Fatal("callback observation changed")
-		}
-		if len(o.Body) > 0 && (o.BodyFromSequence == nil || *o.BodyFromSequence != o.Sequence-1) {
-			t.Fatal("event callback provenance lost")
-		}
-		retained = append(retained, o.Body...)
-	}
-	if bytes.Count(retained, []byte("\n\n")) != 2 || !bytes.Contains(retained, []byte("event: response.completed\ndata: ")) || !bytes.Contains(retained, []byte(`"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}`)) {
-		t.Fatal("complete stock events or terminal usage lost")
-	}
-}
-
-func TestResponsesFramingFailuresAtHookBoundary(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		callbacks []string
-		gap       string
-	}{
-		{"event-only", []string{"event: response.completed"}, "truncated_frame_withheld"},
-		{"truncated-json", []string{"event: response.completed", `data: {"response":`}, "truncated_frame_withheld"},
-		{"malformed-json", []string{"event: response.completed", "data: {bad}\n\n"}, "invalid_or_unredactable_sse_withheld"},
-		{"invalid-event", []string{"event: invalid event", "data: {}\n\n"}, "invalid_or_unredactable_sse_withheld"},
-		// Inserting the missing newline must still respect the same frame cap.
-		{"frame-limit", []string{"event: x", "data: " + strings.Repeat("x", MaxBody-len("event: x")-len("data: "))}, "redaction_frame_limit"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			found := false
-			for _, o := range captureResponsesCallbacks(t, tc.callbacks)[1:] {
-				if len(o.Body) != 0 {
-					t.Fatal("unsafe frame retained")
-				}
-				found = found || o.Gap == tc.gap
-			}
-			if !found {
-				t.Fatalf("missing %s", tc.gap)
-			}
-		})
-	}
-}
-
-func TestResponsesJSONTransportSplits(t *testing.T) {
-	// Field-looking text inside JSON is not a callback line boundary. Try
-	// every byte split, including CRLF, UTF-8, escapes and multiline data.
-	for _, frame := range []string{
-		"event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"secret-value é data: event: retry: id: : \\\"\"}\r\n\r\n",
-		"event: response.completed\ndata: {\n" + "data: \"type\":\"response.completed\",\n" + "data: \"response\":{\"usage\":{\"input_tokens\":7}}}\n\n",
-	} {
-		whole := FrameRedactor{allowUndelimited: true}
-		want, _, gap := whole.Feed([]byte(frame), 1, true, true, []string{"secret-value"})
-		if gap != "" || len(want) == 0 {
-			t.Fatal("invalid test frame")
-		}
-		for split := 0; split <= len(frame); split++ {
-			r := FrameRedactor{allowUndelimited: true}
-			a, _, gapA := r.Feed([]byte(frame[:split]), 1, true, false, []string{"secret-value"})
-			b, _, gapB := r.Feed([]byte(frame[split:]), 2, true, true, []string{"secret-value"})
-			if gapA != "" || gapB != "" || !bytes.Equal(append(a, b...), want) {
-				t.Fatalf("split %d changed content or gap: %q %q", split, gapA, gapB)
-			}
+	callbacks = append(callbacks, "event: response.completed", `data: {"truncated":`, "data: {bad}\n\n", string([]byte{0xff, 0, 0x80}))
+	observations := captureHookBodies(t, `{"stream":true}`, "", callbacks)
+	for i, o := range observations[1 : len(observations)-1] {
+		if !bytes.Equal(o.Body, []byte(callbacks[i])) || o.Gap != "" {
+			t.Fatalf("callback %d was rewritten or withheld", i)
 		}
 	}
 }
 
-func TestResponsesChunkedJSONAtHookBoundary(t *testing.T) {
-	for _, callbacks := range [][]string{
-		{"event: response.output_text.delta", `data: {"type":"response.output_text.delta","delta":"literal `, `data: field"}`},
-		{"event: response.output_text.delta", "data: {\n", "data: \"type\":\"response.output_text.delta\",\n", "data: \"delta\":\"literal data: field\"}\n\n"},
-	} {
-		var retained []byte
-		for _, o := range captureResponsesCallbacks(t, callbacks)[1:] {
-			if o.Gap != "" {
-				t.Fatalf("chunked JSON withheld: %s", o.Gap)
-			}
-			retained = append(retained, o.Body...)
-		}
-		if !bytes.Contains(retained, []byte(`"delta":"literal data: field"`)) {
-			t.Fatal("chunk boundary changed JSON content")
+func TestHookBodyLimitRemainsExplicit(t *testing.T) {
+	callbacks := []string{strings.Repeat("x", MaxBody), strings.Repeat("y", MaxBody+1)}
+	observations := captureHookBodies(t, `{"stream":true}`, "", callbacks)
+	if string(observations[1].Body) != callbacks[0] || len(observations[2].Body) != 0 || observations[2].ObservedBodyBytes != MaxBody+1 || observations[2].Gap != "observation_body_limit" {
+		t.Fatal("body bounds or loss evidence changed")
+	}
+}
+
+func TestCredentialMetadataOmissionPreservesContent(t *testing.T) {
+	key := testConfig().Bindings[0].Key
+	o := Observation{Model: "model-" + key, TraceID: "trace-" + key, Correlation: map[string]string{"requestId": "exact", "runId": key}, Body: []byte(`{"secret":"content"}`)}
+	excludeCredentialMetadata(&o, testConfig().Bindings)
+	if o.Model != "" || o.TraceID != "" || o.Correlation["runId"] != "" || o.Correlation["requestId"] != "exact" || len(o.MetadataOmissions) != 2 || string(o.Body) != `{"secret":"content"}` {
+		t.Fatal("metadata exclusion changed identity or payload")
+	}
+	for _, raw := range []string{`42`, `{"secret":"opaque-auth-secret"}`, `["id"]`} {
+		if metadataIdentity(json.RawMessage(raw), "selectedAuthId", &o) != "" {
+			t.Fatal("untyped auth metadata accepted")
 		}
 	}
 }
 
-func TestResponsesLineCallbacksProtectSemanticSecrets(t *testing.T) {
-	for _, kind := range []string{"response.output_text.delta", "response.function_call_arguments.delta"} {
-		t.Run(kind, func(t *testing.T) {
-			parts := []string{"secret-", "value"}
-			if kind == "response.function_call_arguments.delta" {
-				parts = []string{`{"api_`, `key":"unknown-credential"}`}
-			}
-			var callbacks []string
-			for _, part := range parts {
-				payload, _ := json.Marshal(map[string]any{"type": kind, "item_id": "synthetic", "delta": part})
-				callbacks = append(callbacks, "event: "+kind, "data: "+string(payload))
-			}
-			var retained []byte
-			for _, o := range captureResponsesCallbacks(t, callbacks)[1:] {
-				if o.Gap != "" || (o.Sequence <= 3 && len(o.Body) > 0) {
-					t.Fatal("ambiguous fragment released or redaction gap")
-				}
-				retained = append(retained, o.Body...)
-			}
-			if bytes.Contains(retained, []byte("secret-")) || bytes.Contains(retained, []byte("unknown-credential")) || !bytes.Contains(retained, []byte("[REDACTED]")) {
-				t.Fatal("semantic credential fragments leaked or lost")
-			}
-		})
+func TestCompletionDiagnosticFidelityAndBound(t *testing.T) {
+	for _, diagnostic := range []string{"request failed: token=" + testConfig().Bindings[0].Key, strings.Repeat("x", 4097)} {
+		observations := captureHookBodies(t, `{"stream":true}`, "", nil, diagnostic)
+		o := observations[len(observations)-1]
+		if len(diagnostic) <= 4096 && o.Error != diagnostic {
+			t.Fatal("private diagnostic content scrubbed")
+		}
+		if len(diagnostic) > 4096 && (o.Error != "" || o.MetadataOmissions[0] != "error:limit" || o.Gap != "diagnostic_text_limit" || o.ObservedErrorBytes != len(diagnostic)) {
+			t.Fatal("diagnostic bound not explicit")
+		}
 	}
 }

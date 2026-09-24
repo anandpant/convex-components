@@ -10,7 +10,7 @@ export type { SSEFrame, SSECheckpoint } from "./framing.js";
 export type { CliproxyProjection, ProjectionState } from "./types.js";
 export { assembleResponsesStream, assembleChatStream, assembleAnthropicStream };
 export { nanoTime } from "./values.js";
-export const PARSER_VERSION = "client-protocol-v1";
+export const PARSER_VERSION = "client-protocol-v2";
 export function protocolForRoute(route: string): CliproxyProjection["protocol"] {
   if (route === "POST /v1/messages" || route === "POST /v1/messages/count_tokens")
     return "anthropic_messages";
@@ -25,6 +25,8 @@ export function projectCapturedPayloads(args: {
   response?: Uint8Array;
   chunks?: readonly Uint8Array[];
   complete?: boolean;
+  /** Set only for capturePolicy hook-body-v1, never historical canonical SSE. */
+  stockHookChunks?: boolean;
 }): CliproxyProjection {
   const projection: CliproxyProjection = {
     version: 1,
@@ -68,7 +70,9 @@ export function projectCapturedPayloads(args: {
       if (bytes > 16 * 1024 * 1024)
         throw new Error("bounded replay limit; use event pages for larger calls");
       try {
-        for (const frame of reader.feed(chunk)) {
+        for (const frame of args.stockHookChunks
+          ? reader.feedStock(chunk, projection.protocol)
+          : reader.feed(chunk)) {
           if (frame.data === "[DONE]") {
             done = true;
             continue;

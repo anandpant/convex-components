@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Preserve exact bounded hook payload bytes with `hook-body-v1`; remove native content redaction and semantic withholding.
+- Derive stock stream framing in the receiver, distinguishing complete raw capture from malformed/truncated projection.
+- Capture after-auth request bodies, execution model/protocol and exact selected auth IDs without collecting credential headers or opaque metadata.
+
 ## 0.1.1
 
 - Include the receiver-bound destination and deployment IDs in segment admission and duplicate ACKs so the native exporter can verify its delivery target.

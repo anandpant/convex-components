@@ -13,6 +13,12 @@ export function assembleResponsesStream(events: RecordValue[]) {
   let unsupported = false;
   for (const event of events) {
     const type = String(event.type);
+    if (type === "keepalive") {
+      // This control frame carries no response content, identity or final usage.
+      recognized = true;
+      if (count(event.sequence_number) === undefined) invalid = true;
+      continue;
+    }
     if (
       [
         "response.created",

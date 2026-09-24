@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Recognize valid Responses keepalive control frames without downgrading otherwise complete capture projection and terminal usage. Malformed sequence numbers and unrelated unknown or malformed events remain diagnostic.
+- Native plugin/exporter source, native reported version (0.2.0), capture schema, and ABI remain unchanged. This package update does not rewrite historical projections or require a native host upgrade.
+
 ## 0.2.1
 
 - Preserve recorded selected-auth identity when stream initialization omits auth metadata. Explicit selections still replace the pair; new after-auth events retain unknown fields rather than inheriting a previous selection.

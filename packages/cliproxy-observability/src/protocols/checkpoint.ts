@@ -194,7 +194,13 @@ export function applyObservation(
   }
   const body = decodeBody(o);
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  if (o.kind === "request_after_auth" || o.kind === "stream_init") {
+  // A new after-auth event replaces the selection, including unknown fields.
+  // Stream initialization may omit auth; an explicit selection replaces the pair.
+  if (
+    o.kind === "request_after_auth" ||
+    (o.kind === "stream_init" &&
+      (o.selectedAuthId !== undefined || o.selectedAuthIndex !== undefined))
+  ) {
     call.selectedAuthId = o.selectedAuthId;
     call.selectedAuthIndex = o.selectedAuthIndex;
   }

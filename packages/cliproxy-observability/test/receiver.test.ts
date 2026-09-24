@@ -11,6 +11,7 @@ import {
   projectPendingSegments,
   resolveCallBlob,
   type PrivateCaptureStorage,
+  type ModelCallV1,
 } from "../src/client.js";
 import { sha256, callIdentity, type CaptureObservationV1 } from "../src/capture/index.js";
 const events = (
@@ -421,3 +422,133 @@ it("authenticates content-free health and retains boot loss counters without reg
     capture: { gaps: ["completion_unobserved_prior_boot"] },
   });
 });
+
+const authSelection = {
+  selectedAuthId: "fixture-auth-a",
+  selectedAuthIndex: "fixture-index-a",
+  executionModel: "fixture-model-a",
+  executionProtocol: "codex",
+};
+const nextSelection = {
+  selectedAuthId: "fixture-auth-b",
+  selectedAuthIndex: "fixture-index-b",
+  executionModel: "fixture-model-b",
+  executionProtocol: "responses",
+};
+
+it.each([false, true])(
+  "preserves selected auth across metadata-free stream initialization (incremental=%s)",
+  async (incremental) => {
+    const s = setup();
+    const request: CaptureObservationV1 = {
+      schemaVersion: 1,
+      pluginVersion: "0.2.0",
+      capturePolicy: "hook-body-v1",
+      destinationId: s.options.destinationId,
+      instanceId: s.options.instanceIds[0]!,
+      pluginBootId: "fixture-boot",
+      requestId: "fixture-auth-request",
+      configRevision: "fixture",
+      sequence: 1,
+      offsetNs: 1,
+      observedAt: "2026-09-24T00:00:00Z",
+      route: "POST /v1/responses",
+      kind: "request",
+      body: btoa('{"stream":true}'),
+      contentBytes: 15,
+      contentSha256: await sha256(encode.encode('{"stream":true}')),
+    };
+    const observation = async (
+      sequence: number,
+      kind: CaptureObservationV1["kind"],
+      metadata: Partial<CaptureObservationV1> = {},
+    ): Promise<CaptureObservationV1> => ({
+      ...request,
+      sequence,
+      offsetNs: sequence,
+      kind,
+      body: "",
+      contentBytes: 0,
+      contentSha256: await sha256(new Uint8Array()),
+      ...metadata,
+    });
+    const callId = await callIdentity(request);
+    const args = { destinationId: request.destinationId, callId };
+    const observations = [
+      request,
+      await observation(2, "request_after_auth", authSelection),
+      await observation(3, "stream_init"),
+    ];
+    for (const group of incremental ? observations.map((o) => [o]) : [observations]) {
+      expect((await s.post(await envelope(group))).status).toBe(200);
+      expect(await projectPendingSegments(s.ctx, { ...s.options, callId })).toMatchObject({
+        progressed: true,
+        more: false,
+      });
+    }
+    const read = async () => {
+      const stored = await s.client.getCall(s.ctx, args);
+      return JSON.parse(stored!.summaryJson) as ModelCallV1;
+    };
+    expect(await read()).toMatchObject({
+      ...authSelection,
+      authType: "unknown",
+      capture: { projectedThroughSequence: 3 },
+    });
+    // Each explicit selection replaces the pair; never combine identities from two selections.
+    const changes: Array<
+      [CaptureObservationV1["kind"], Partial<CaptureObservationV1>, Partial<ModelCallV1>]
+    > = [
+      [
+        "stream_init",
+        nextSelection,
+        {
+          ...authSelection,
+          selectedAuthId: nextSelection.selectedAuthId,
+          selectedAuthIndex: nextSelection.selectedAuthIndex,
+        },
+      ],
+      [
+        "stream_init",
+        { selectedAuthId: "id-only" },
+        { ...authSelection, selectedAuthId: "id-only", selectedAuthIndex: undefined },
+      ],
+      [
+        "stream_init",
+        { selectedAuthIndex: "index-only" },
+        { ...authSelection, selectedAuthId: undefined, selectedAuthIndex: "index-only" },
+      ],
+      ["request_after_auth", nextSelection, nextSelection],
+      [
+        "request_after_auth",
+        {},
+        {
+          selectedAuthId: undefined,
+          selectedAuthIndex: undefined,
+          executionModel: undefined,
+          executionProtocol: undefined,
+        },
+      ],
+      [
+        "stream_init",
+        {},
+        {
+          selectedAuthId: undefined,
+          selectedAuthIndex: undefined,
+          executionModel: undefined,
+          executionProtocol: undefined,
+        },
+      ],
+    ];
+    for (const [index, [kind, metadata, expected]] of changes.entries()) {
+      const next = await observation(index + 4, kind, metadata);
+      expect((await s.post(await envelope([next]))).status).toBe(200);
+      await projectPendingSegments(s.ctx, { ...s.options, callId });
+      const call = await read();
+      for (const [key, value] of Object.entries(expected))
+        expect(call[key as keyof ModelCallV1]).toEqual(value);
+      expect(call.capture.projectedThroughSequence).toBe(index + 4);
+      expect(call.authType).toBe("unknown");
+    }
+  },
+);

@@ -20,6 +20,7 @@ export type CliproxyProjection = {
     totalTokens?: number;
     reasoningTokens?: number;
     cachedInputTokens?: number;
+    cacheCreationInputTokens?: number;
     statusJson?: string;
   };
   metadata: RecordValue;

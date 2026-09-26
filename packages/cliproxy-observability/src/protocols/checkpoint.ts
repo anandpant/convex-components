@@ -1,7 +1,9 @@
-import type {
-  ModelCallV1,
-  UsageMeasurement,
-  PrivateContentReference,
+import {
+  providerIdentity,
+  TOKEN_FIELDS,
+  type ModelCallV1,
+  type UsageMeasurement,
+  type PrivateContentReference,
 } from "../model-call/index.js";
 import type { CaptureObservationV1 } from "../capture/index.js";
 import { decodeBody } from "../capture/index.js";
@@ -52,6 +54,9 @@ function boundedUsage(value: unknown): RecordValue {
     const safe: RecordValue = {};
     for (const name of [
       "cached_tokens",
+      "cache_write_tokens",
+      "cached_creation_tokens",
+      "cache_creation_tokens",
       "reasoning_tokens",
       "thinking_tokens",
       "ephemeral_5m_input_tokens",
@@ -223,6 +228,8 @@ export function applyObservation(
       state.invalid = true;
     }
   }
+  // Derived read fields: reads fill them only for summaries projected before 0.3.0.
+  Object.assign(call, providerIdentity(call), { costProvenance: call.cost.kind });
   if (o.kind === "response" || o.kind === "stream_chunk" || o.kind === "completion") {
     if (call.timeToFirstByteMs === undefined && (o.observedBodyBytes ?? body.length) > 0)
       call.timeToFirstByteMs = o.offsetNs / 1e6;
@@ -341,14 +348,7 @@ export function applyObservation(
       }
     }
     call.usage = measurements;
-    for (const field of [
-      "inputTokens",
-      "outputTokens",
-      "totalTokens",
-      "reasoningTokens",
-      "cachedInputTokens",
-    ] as const)
-      call[field] = final ? projection.scalars[field] : undefined;
+    for (const field of TOKEN_FIELDS) call[field] = final ? projection.scalars[field] : undefined;
   }
   call.capture.lastObservedAt = o.observedAt;
   call.capture.projectedThroughSequence = o.sequence;

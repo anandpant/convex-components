@@ -13,18 +13,28 @@ async function summaryView(
   },
 ) {
   const summary = JSON.parse(row.summaryJson) as ModelCallV1;
-  // Summaries projected before 0.3.0 lack these; derive them from the facts they recorded.
-  if (summary.providerProvenance === undefined) Object.assign(summary, providerIdentity(summary));
-  summary.costProvenance ??= summary.cost.kind;
-  if (
-    summary.capture.usage === "complete" &&
-    summary.clientProtocol !== undefined &&
-    summary.clientProtocol !== "unknown"
-  )
-    summary.cacheCreationInputTokens ??= normalizeUsage(
-      summary.clientProtocol,
-      new Map(summary.usage.map((measurement) => [measurement.nativeField, measurement.value])),
-    ).cacheCreationInputTokens;
+  // Summaries projected before 0.3.0 lack these. Derive them from the facts they recorded,
+  // keeping any stored provider name as observed and applying the current token rule to
+  // their final native counts.
+  if (summary.providerProvenance === undefined) {
+    Object.assign(
+      summary,
+      providerIdentity({ ...summary, observedProvider: summary.providerName }),
+    );
+    summary.costProvenance = summary.cost.kind;
+    if (
+      summary.capture.usage === "complete" &&
+      summary.clientProtocol !== undefined &&
+      summary.clientProtocol !== "unknown"
+    )
+      Object.assign(
+        summary,
+        normalizeUsage(
+          summary.clientProtocol,
+          new Map(summary.usage.map((measurement) => [measurement.nativeField, measurement.value])),
+        ),
+      );
+  }
   if (summary.state === "in_progress" && row.terminalSequence === undefined) {
     const source = await ctx.db
       .query("sourceStatus")

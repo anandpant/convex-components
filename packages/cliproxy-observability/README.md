@@ -35,18 +35,18 @@ For `capturePolicy: hook-body-v1`, decode each observation body from base64 and 
 
 ## Provider, tokens and cost
 
-`providerIdentity` derives `providerName` and `providerProvenance` from one call's recorded facts, never from time or call order:
+`providerIdentity` derives `providerName` and `providerProvenance` from one call's recorded facts, never from time or call order. The first rule that applies wins:
 
-1. `observed`: the recording names the provider. Only the OpenRouter adapter sets this today. Native captures would need the plugin to record the selected auth's provider on `request.intercept_after`.
-2. `derived_from_execution_protocol`: an after-auth execution model or protocol was recorded, and `PROVIDER_BY_EXECUTION_PROTOCOL` maps the protocol (`claude` and `messages` to `anthropic`; `openai-response`, `responses`, `codex` and `chat` to `openai`). An unmapped protocol, or an execution model without one, is `unavailable`; it never falls back to the requested model.
-3. `derived_from_model`: no execution was recorded, and `PROVIDER_BY_MODEL_PREFIX` matches the requested model (`claude-` to `anthropic`; `gpt-`, `o` plus a digit, and `codex` to `openai`; `gemini-` to `google`). This is a guess from the model name, since CLIProxy can route any alias to any upstream.
-4. `unavailable` otherwise.
+1. `observed`: the recording itself names the provider. Only the OpenRouter adapter sets this today, and reads keep any provider name an older summary stored. For CLIProxy calls, the only exact source would be the native plugin recording the selected auth's provider on `request.intercept_after`; that is a follow-up.
+2. `derived_from_wire_format`: `executionProtocol`, the upstream wire format CLIProxy recorded after auth (its ToFormat), is in `PROVIDER_BY_WIRE_FORMAT`. `claude` maps to `anthropic`; `openai`, `openai-response` and `codex` to `openai`; `gemini`, `gemini-cli` and `antigravity` to `google`. This names the API family, not the vendor account: `claude` also reaches other Anthropic-compatible hosts, and CLIProxy uses `codex` for xAI and Meta as well.
+3. `derived_from_model`: `PROVIDER_BY_MODEL_PREFIX` matches the requested model, including when the wire format is absent or unmapped (such as `interactions`). `claude-` maps to `anthropic`; `gpt-`, `o` plus a digit, and `codex` to `openai`; `gemini-` to `google`. CLIProxy can route any alias to any upstream, so this is only a guess.
+4. `unavailable` when no rule applies.
 
-Both derived values are guesses, not recorded identity. The recordings in `fixtures/real` have no after-auth frames, so they derive `openai` from `gpt-5.6-luna` although their recorded upstream was a gateway.
+The recordings in `fixtures/real` have no after-auth frames, so they derive `openai` from `gpt-5.6-luna` although their recorded upstream was a gateway.
 
 Token fields use the OpenRouter names and unit (tokens per call): `inputTokens`, `outputTokens`, `totalTokens`, `reasoningTokens`, `cachedInputTokens` (cache reads) and `cacheCreationInputTokens` (cache writes). They come only from terminal client-protocol usage and are set only when that usage is final. The rule is one table in `src/protocols/usage.ts`:
 
-- Input includes cache reads and writes. Anthropic reports `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens` as disjoint counts, so its input is their sum and needs all three. CLIProxy's translators omit zero cache counts, so a Messages call translated from another upstream keeps `inputTokens` unset; its raw `input_tokens` stays in `usage`.
+- Input includes cache reads and writes. Anthropic reports `cache_read_input_tokens` and `cache_creation_input_tokens` apart from `input_tokens`, so its input is their sum. Anthropic and CLIProxy's translators omit a cache count when no cache is used, so an absent one counts as 0; `input_tokens` itself is required.
 - `totalTokens` is the reported `total_tokens`. Anthropic Messages reports none, and this package never sums one.
 - Cache reads: Anthropic `cache_read_input_tokens`, Responses `input_tokens_details.cached_tokens`, Chat `prompt_tokens_details.cached_tokens`.
 - Cache writes: Anthropic `cache_creation_input_tokens` (its `cache_creation.ephemeral_*` split stays raw), Responses `input_tokens_details.cache_write_tokens` or `cache_creation_tokens`, Chat `prompt_tokens_details.cache_write_tokens`, `cached_creation_tokens` or `cache_creation_tokens`. The first reported alias wins.
@@ -56,15 +56,15 @@ Every reported native count also stays in `usage` as a `UsageMeasurement` with i
 
 Cost is never estimated. Native calls keep `cost: { kind: "unknown" }` with `costProvenance: "unknown"`, because CLIProxy's client protocols report no price. `fromOpenRouterSpan` keeps OpenRouter's charge as a `proxy_reported` USD cost.
 
-Summaries projected before 0.3.0 did not store these fields. `getCall` and `pageRecentSummaries` derive them on read from the facts those summaries recorded, taking `cacheCreationInputTokens` from a final raw measurement. Stored rows are not rewritten.
+`providerProvenance` and `costProvenance` are optional in `ModelCallV1`. Summaries projected by 0.3.0 or later store them. For older summaries, `getCall` and `pageRecentSummaries` derive them from the facts those summaries recorded. The same reads apply the current token rule to an older summary's final native counts, which adds `cacheCreationInputTokens` and counts absent Messages cache counts as 0. Stored rows are not rewritten.
 
-Projected summaries of the real recordings measure 1,783 to 2,934 bytes. A streamed Opus call with an after-auth frame, all ten correlations and every Anthropic usage count measures 3,778 bytes, under the 8 KiB summary cap. With every bounded string at its validator maximum a summary still reaches 9,590 bytes (10,253 before 0.3.0), so the cap is not a guarantee for adversarial metadata.
+Projected summaries of the real recordings measure 1,783 to 2,934 bytes. A streamed Opus call with an after-auth frame, all ten correlations and every Anthropic usage count measures 3,771 bytes, under the 8 KiB summary cap. With every bounded string at its validator maximum a summary still reaches 9,583 bytes (10,253 before 0.3.0), so the cap is not a guarantee for adversarial metadata.
 
 ### Differences from the OpenRouter component
 
 - The OpenRouter component stores costs as bare numbers with no currency; `fromOpenRouterSpan` labels them USD. CLIProxy records no cost.
 - Provenance exists only in `ModelCallV1`. The OpenRouter component's own summaries carry neither provider nor cost provenance.
-- OpenRouter's `providerName` is the upstream it routed to, as OpenRouter names it (for example `OpenAI`). CLIProxy's is a lowercase provider family derived from recorded facts. It is not authoritative until the native plugin records the selected auth's provider.
+- OpenRouter's `providerName` is the upstream it routed to, as OpenRouter names it (for example `OpenAI`). CLIProxy's is a lowercase API family or model-name guess. It is not authoritative until the native plugin records the selected auth's provider.
 - The OpenRouter recordings here carry no cache-write count, so `cacheCreationInputTokens` stays unset for OpenRouter calls. The structural `OpenRouterSpanInput` accepts it if a host supplies one.
 - OpenRouter summaries expose input, output and total tokens; its cached and reasoning counts are only on full spans (`exportFullSpan`).
 

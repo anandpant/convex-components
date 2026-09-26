@@ -150,7 +150,7 @@ it("keeps capture loss explicit even when terminal usage is recorded", async () 
   expect(call.totalTokens).toBeUndefined();
 });
 
-it("records after-auth model and selected IDs, deriving the provider only from the execution protocol", async () => {
+it("records after-auth model and selected IDs, deriving the provider from the wire format", async () => {
   const request = {
     ...(await observation(`{"stream":true}`, 1, "request")),
     requestedModel: "claude-opus-5-5",
@@ -181,9 +181,9 @@ it("records after-auth model and selected IDs, deriving the provider only from t
     selectedAuthIndex: "auth-index",
     attemptDetail: "unavailable",
     correlation: {},
-    // The execution outranks the requested model's name.
+    // The wire format outranks the requested model's name.
     providerName: "openai",
-    providerProvenance: "derived_from_execution_protocol",
+    providerProvenance: "derived_from_wire_format",
   });
 });
 

@@ -65,6 +65,8 @@ it("labels legacy gateway rows and leaves OAuth cost unknown", () => {
     costProvenance: "unknown",
   });
 });
+// Wire formats are the after-auth ToFormat values stock CLIProxy resolves; `gemini-cli` is
+// the pre-7.3 Gemini CLI format.
 it.each([
   [
     "a recorded provider",
@@ -73,49 +75,50 @@ it.each([
     "observed",
   ],
   [
-    "Claude execution",
+    "the claude format",
     { executionProtocol: "claude", requestModel: "gpt-5" },
     "anthropic",
-    "derived_from_execution_protocol",
+    "derived_from_wire_format",
   ],
+  ["the openai format", { executionProtocol: "openai" }, "openai", "derived_from_wire_format"],
   [
-    "Messages execution",
-    { executionProtocol: "messages" },
-    "anthropic",
-    "derived_from_execution_protocol",
-  ],
-  [
-    "Responses execution",
+    "the openai-response format",
     { executionProtocol: "openai-response" },
     "openai",
-    "derived_from_execution_protocol",
+    "derived_from_wire_format",
   ],
   [
-    "responses execution",
-    { executionProtocol: "responses" },
-    "openai",
-    "derived_from_execution_protocol",
-  ],
-  [
-    "Codex execution",
+    "the codex format",
     { executionProtocol: "codex", requestModel: "claude-opus-5-5" },
     "openai",
-    "derived_from_execution_protocol",
+    "derived_from_wire_format",
   ],
-  ["Chat execution", { executionProtocol: "chat" }, "openai", "derived_from_execution_protocol"],
+  ["the gemini format", { executionProtocol: "gemini" }, "google", "derived_from_wire_format"],
   [
-    "an unmapped execution",
-    { executionProtocol: "gemini", requestModel: "claude-opus-5-5" },
-    undefined,
-    "unavailable",
+    "the gemini-cli format",
+    { executionProtocol: "gemini-cli" },
+    "google",
+    "derived_from_wire_format",
   ],
-  ["a prototype-named execution", { executionProtocol: "toString" }, undefined, "unavailable"],
   [
-    "an execution model alone",
-    { executionModel: "claude-opus-5-5", requestModel: "claude-opus-5-5" },
-    undefined,
-    "unavailable",
+    "the antigravity format",
+    { executionProtocol: "antigravity" },
+    "google",
+    "derived_from_wire_format",
   ],
+  [
+    "an unmapped format over a Gemini model",
+    { executionProtocol: "interactions", requestModel: "gemini-3-pro" },
+    "google",
+    "derived_from_model",
+  ],
+  [
+    "a prototype-named format over a Claude model",
+    { executionProtocol: "toString", requestModel: "claude-opus-5-5" },
+    "anthropic",
+    "derived_from_model",
+  ],
+  ["an unmapped format alone", { executionProtocol: "interactions" }, undefined, "unavailable"],
   ["a Claude model", { requestModel: "claude-opus-5-5" }, "anthropic", "derived_from_model"],
   ["a GPT model", { requestModel: "gpt-5.6-luna" }, "openai", "derived_from_model"],
   ["an o-series model", { requestModel: "o4-mini" }, "openai", "derived_from_model"],

@@ -1,5 +1,6 @@
 import {
   providerIdentity,
+  TOKEN_FIELDS,
   type ModelCallV1,
   type UsageMeasurement,
   type PrivateContentReference,
@@ -9,7 +10,7 @@ import { decodeBody } from "../capture/index.js";
 import { assembleResponsesStream } from "./responses.js";
 import { SSEReader, type SSECheckpoint } from "./framing.js";
 import { count, list, nanoTime, object, parseObject } from "./values.js";
-import { extractUsage, TOKEN_FIELDS } from "./usage.js";
+import { extractUsage } from "./usage.js";
 import type { CliproxyProjection, RecordValue } from "./types.js";
 /** Bounded semantic state. Emitted text/tools stay in immutable content segments. */
 export type ProjectionCheckpoint = {
@@ -227,7 +228,8 @@ export function applyObservation(
       state.invalid = true;
     }
   }
-  Object.assign(call, providerIdentity(call));
+  // Derived read fields: reads fill them only for summaries projected before 0.3.0.
+  Object.assign(call, providerIdentity(call), { costProvenance: call.cost.kind });
   if (o.kind === "response" || o.kind === "stream_chunk" || o.kind === "completion") {
     if (call.timeToFirstByteMs === undefined && (o.observedBodyBytes ?? body.length) > 0)
       call.timeToFirstByteMs = o.offsetNs / 1e6;

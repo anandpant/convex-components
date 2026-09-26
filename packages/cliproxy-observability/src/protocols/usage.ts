@@ -1,31 +1,25 @@
+import { TOKEN_FIELDS, type TokenField } from "../model-call/index.js";
 import type { CliproxyProjection, RecordValue } from "./types.js";
 import { count } from "./values.js";
-export const TOKEN_FIELDS = [
-  "inputTokens",
-  "outputTokens",
-  "totalTokens",
-  "reasoningTokens",
-  "cachedInputTokens",
-  "cacheCreationInputTokens",
-] as const;
-type TokenField = (typeof TOKEN_FIELDS)[number];
 /** Names the rule below in each usage measurement. */
 const USAGE_SEMANTICS = "client_protocol_usage_v2";
 /**
  * The one token normalization rule, read from terminal native usage (`details.field` for
- * nested counts). `sum` needs every listed field; `first` takes the first one reported.
- * Input includes cache reads and writes, as OpenAI-style usage reports it. Anthropic reports
- * them disjoint from `input_tokens`, so its input is their sum and any missing component
- * leaves it unknown. `totalTokens` is only ever the reported `total_tokens`; Anthropic reports
- * none and it is never summed. Nothing is manufactured from byte or text lengths.
+ * nested counts). `first` takes the first listed field reported. `base` needs its field and
+ * adds each `plus` field, counting an absent one as 0. Input includes cache reads and writes,
+ * as OpenAI-style usage reports it. Anthropic reports them apart from `input_tokens` and omits
+ * them when no cache is used, as do CLIProxy's translators, so its input is the sum.
+ * `totalTokens` is only ever the reported `total_tokens`; Anthropic reports none and it is
+ * never summed. Nothing is manufactured from byte or text lengths.
  */
 const TOKEN_NORMALIZATION: Record<
   Exclude<CliproxyProjection["protocol"], "unknown">,
-  Record<TokenField, { sum: readonly string[] } | { first: readonly string[] }>
+  Record<TokenField, { first: readonly string[] } | { base: string; plus: readonly string[] }>
 > = {
   anthropic_messages: {
     inputTokens: {
-      sum: ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"],
+      base: "input_tokens",
+      plus: ["cache_read_input_tokens", "cache_creation_input_tokens"],
     },
     outputTokens: { first: ["output_tokens"] },
     totalTokens: { first: ["total_tokens"] },
@@ -68,12 +62,17 @@ export function normalizeUsage(
   const out: Partial<Record<TokenField, number>> = {};
   for (const field of TOKEN_FIELDS) {
     const rule = TOKEN_NORMALIZATION[protocol][field];
+    if ("first" in rule) {
+      out[field] = rule.first
+        .map((name) => reported.get(name))
+        .find((value) => value !== undefined);
+      continue;
+    }
+    const base = reported.get(rule.base);
     out[field] =
-      "sum" in rule
-        ? rule.sum.every((name) => reported.has(name))
-          ? count(rule.sum.reduce((total, name) => total + reported.get(name)!, 0))
-          : undefined
-        : rule.first.map((name) => reported.get(name)).find((value) => value !== undefined);
+      base === undefined
+        ? undefined
+        : count(rule.plus.reduce((total, name) => total + (reported.get(name) ?? 0), base));
   }
   return out;
 }

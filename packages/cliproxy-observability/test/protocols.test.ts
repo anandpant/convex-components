@@ -12,8 +12,9 @@ const recording = (name: string) =>
     }
   ).events;
 // Recorded usage: Messages {input 309, output 7}; Responses adds cached, reasoning and
-// total; Chat also reports cache_write_tokens 0. Messages omits both cache counts.
-const messagesTokens = { outputTokens: 7 };
+// total; Chat also reports cache_write_tokens 0. Messages omits both cache counts, as
+// CLIProxy's translators do when no cache is used, so they count as 0 toward input.
+const messagesTokens = { inputTokens: 309, outputTokens: 7 };
 const responsesTokens = {
   inputTokens: 309,
   outputTokens: 7,
@@ -52,7 +53,6 @@ it.each([
     cachedInputTokens: call.cachedInputTokens,
     cacheCreationInputTokens: call.cacheCreationInputTokens,
   }).toEqual({
-    inputTokens: undefined,
     totalTokens: undefined,
     reasoningTokens: undefined,
     cachedInputTokens: undefined,
@@ -82,6 +82,7 @@ it.each([
 });
 it.each([
   [
+    "Messages with every cache count",
     "POST /v1/messages",
     {
       type: "message",
@@ -100,6 +101,20 @@ it.each([
     ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"],
   ],
   [
+    "Messages without a cache write",
+    "POST /v1/messages",
+    {
+      type: "message",
+      id: "message",
+      content: [],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 10, cache_read_input_tokens: 20, output_tokens: 5 },
+    },
+    { inputTokens: 30, outputTokens: 5, cachedInputTokens: 20 },
+    ["input_tokens", "cache_read_input_tokens"],
+  ],
+  [
+    "Responses",
     "POST /v1/responses",
     {
       object: "response",
@@ -125,6 +140,7 @@ it.each([
     ["input_tokens", "input_tokens_details.cache_write_tokens"],
   ],
   [
+    "Chat",
     "POST /v1/chat/completions",
     {
       choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }],
@@ -148,7 +164,7 @@ it.each([
   ],
 ] as const)(
   "normalizes %s usage into OpenRouter token fields beside the native counts",
-  async (route, response, tokens, nativeFields) => {
+  async (_name, route, response, tokens, nativeFields) => {
     const base = recording("messages-json")[0]!;
     const observed = (
       sequence: number,
@@ -182,7 +198,12 @@ it.each([
       reasoningTokens: call.reasoningTokens,
       cachedInputTokens: call.cachedInputTokens,
       cacheCreationInputTokens: call.cacheCreationInputTokens,
-    }).toEqual({ totalTokens: undefined, reasoningTokens: undefined, ...tokens });
+    }).toEqual({
+      totalTokens: undefined,
+      reasoningTokens: undefined,
+      cacheCreationInputTokens: undefined,
+      ...tokens,
+    });
     for (const nativeField of nativeFields)
       expect(call.usage).toContainEqual(
         expect.objectContaining({ nativeField, finality: "final" }),

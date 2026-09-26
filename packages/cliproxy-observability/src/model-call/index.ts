@@ -33,6 +33,17 @@ export type PrivateContentReference = {
   byteLength: number;
   contentType: string;
 };
+/**
+ * Where `providerName` came from. Only `observed` is recorded identity; both
+ * `derived_*` values are guesses from one call's recorded facts.
+ */
+export type ProviderProvenance =
+  "observed" | "derived_from_execution_protocol" | "derived_from_model" | "unavailable";
+export type ModelCallCost =
+  | { kind: "unknown" }
+  | { kind: "provider_billed" | "proxy_reported"; currency: string; total: string };
+/** Who reported `cost`. Nothing estimates cost, so native CLIProxy calls stay `unknown`. */
+export type CostProvenance = ModelCallCost["kind"];
 export type ModelCallV1 = {
   schemaVersion: 1;
   source: ModelCallSource;
@@ -60,6 +71,7 @@ export type ModelCallV1 = {
   selectedAuthIndex?: string;
   executionProtocol?: string;
   providerName?: string;
+  providerProvenance: ProviderProvenance;
   streamed?: boolean;
   operation: "generation" | "token_count" | "discovery" | "unknown";
   tokenCount?: number;
@@ -82,10 +94,10 @@ export type ModelCallV1 = {
   totalTokens?: number;
   reasoningTokens?: number;
   cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
   usage: UsageMeasurement[];
-  cost:
-    | { kind: "unknown" }
-    | { kind: "provider_billed" | "proxy_reported"; currency: string; total: string };
+  cost: ModelCallCost;
+  costProvenance: CostProvenance;
   attemptDetail: "unavailable";
   capture: {
     raw: EvidenceState;
@@ -107,6 +119,50 @@ export type ModelCallV1 = {
   receivedAt: number;
 };
 export type ModelCallSummaryV1 = ModelCallV1;
+
+/** After-auth execution protocols, by the provider that speaks them. */
+export const PROVIDER_BY_EXECUTION_PROTOCOL: Readonly<Record<string, string>> = {
+  claude: "anthropic",
+  messages: "anthropic",
+  "openai-response": "openai",
+  responses: "openai",
+  codex: "openai",
+  chat: "openai",
+};
+/** Requested-model prefixes: a guess from the model name when no execution was recorded. */
+export const PROVIDER_BY_MODEL_PREFIX: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^claude-/, "anthropic"],
+  [/^gpt-/, "openai"],
+  [/^o\d/, "openai"],
+  [/^codex/, "openai"],
+  [/^gemini-/, "google"],
+];
+/**
+ * Provider identity from one call's recorded facts, never from time or call order.
+ * A recorded after-auth execution model or protocol outranks the requested model:
+ * an unmapped execution protocol stays unavailable instead of falling back to it.
+ */
+export function providerIdentity(
+  facts: Pick<ModelCallV1, "requestModel" | "executionModel" | "executionProtocol"> & {
+    /** A provider named by the recording itself, such as an OpenRouter span. */
+    observedProvider?: string;
+  },
+): Pick<ModelCallV1, "providerName" | "providerProvenance"> {
+  if (facts.observedProvider)
+    return { providerName: facts.observedProvider, providerProvenance: "observed" };
+  const executed = facts.executionModel !== undefined || facts.executionProtocol !== undefined;
+  const providerName = executed
+    ? facts.executionProtocol !== undefined &&
+      Object.hasOwn(PROVIDER_BY_EXECUTION_PROTOCOL, facts.executionProtocol)
+      ? PROVIDER_BY_EXECUTION_PROTOCOL[facts.executionProtocol]
+      : undefined
+    : PROVIDER_BY_MODEL_PREFIX.find(([prefix]) => prefix.test(facts.requestModel ?? ""))?.[1];
+  if (!providerName) return { providerName: undefined, providerProvenance: "unavailable" };
+  return {
+    providerName,
+    providerProvenance: executed ? "derived_from_execution_protocol" : "derived_from_model",
+  };
+}
 
 /** Structural input: there is no runtime dependency on the OpenRouter component. */
 export type OpenRouterSpanInput = {
@@ -139,6 +195,7 @@ export type OpenRouterSpanInput = {
   totalTokens?: number;
   reasoningTokens?: number;
   cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
 };
 export function fromOpenRouterSpan(span: OpenRouterSpanInput): ModelCallV1 {
   const correlation: ExactCorrelation = {};
@@ -158,6 +215,7 @@ export function fromOpenRouterSpan(span: OpenRouterSpanInput): ModelCallV1 {
     "totalTokens",
     "reasoningTokens",
     "cachedInputTokens",
+    "cacheCreationInputTokens",
   ] as const) {
     const value = span[field];
     if (value !== undefined && Number.isSafeInteger(value) && value >= 0)
@@ -171,6 +229,11 @@ export function fromOpenRouterSpan(span: OpenRouterSpanInput): ModelCallV1 {
         semanticsVersion: "stored_openrouter_span_v1",
       });
   }
+  const reported = span.totalCost ?? span.openrouterUsageCost;
+  const cost: ModelCallCost =
+    typeof reported === "number" && Number.isFinite(reported) && reported >= 0
+      ? { kind: "proxy_reported", currency: "USD", total: String(reported) }
+      : { kind: "unknown" };
   return {
     schemaVersion: 1,
     source: "openrouter",
@@ -183,7 +246,7 @@ export function fromOpenRouterSpan(span: OpenRouterSpanInput): ModelCallV1 {
     parentSpanId: span.parentSpanId,
     requestModel: span.requestModel,
     responseModel: span.responseModel,
-    providerName: span.providerName,
+    ...providerIdentity({ observedProvider: span.providerName }),
     streamed: span.streamed,
     operation: "generation",
     state: "unknown",
@@ -198,17 +261,10 @@ export function fromOpenRouterSpan(span: OpenRouterSpanInput): ModelCallV1 {
     totalTokens: span.totalTokens,
     reasoningTokens: span.reasoningTokens,
     cachedInputTokens: span.cachedInputTokens,
+    cacheCreationInputTokens: span.cacheCreationInputTokens,
     usage,
-    cost:
-      typeof (span.totalCost ?? span.openrouterUsageCost) === "number" &&
-      Number.isFinite(span.totalCost ?? span.openrouterUsageCost) &&
-      (span.totalCost ?? span.openrouterUsageCost)! >= 0
-        ? {
-            kind: "proxy_reported",
-            currency: "USD",
-            total: String(span.totalCost ?? span.openrouterUsageCost),
-          }
-        : { kind: "unknown" },
+    cost,
+    costProvenance: cost.kind,
     attemptDetail: "unavailable",
     capture: {
       raw: "unavailable",
@@ -231,7 +287,9 @@ export function fromLegacyCliproxySpan(span: OpenRouterSpanInput): ModelCallV1 {
     callId: `cliproxy_legacy:${span._id}`,
     gateway: "cliproxy",
     providerName: undefined,
+    providerProvenance: "unavailable",
     timingSource: "unavailable",
     cost: { kind: "unknown" },
+    costProvenance: "unknown",
   };
 }

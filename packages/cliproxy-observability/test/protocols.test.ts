@@ -4,28 +4,61 @@ import { callIdentity, decodeBody, type CaptureObservationV1 } from "../src/capt
 import { initialCall } from "../src/client.js";
 import { applyObservation, type ProjectionCheckpoint } from "../src/protocols/checkpoint.js";
 import { projectCapturedPayloads, SSEReader } from "../src/protocols/index.js";
+const encoder = new TextEncoder();
 const recording = (name: string) =>
   (
     JSON.parse(readFileSync(new URL(`../fixtures/real/${name}.json`, import.meta.url), "utf8")) as {
       events: CaptureObservationV1[];
     }
   ).events;
+// Recorded usage: Messages {input 309, output 7}; Responses adds cached, reasoning and
+// total; Chat also reports cache_write_tokens 0. Messages omits both cache counts.
+const messagesTokens = { outputTokens: 7 };
+const responsesTokens = {
+  inputTokens: 309,
+  outputTokens: 7,
+  totalTokens: 316,
+  reasoningTokens: 0,
+  cachedInputTokens: 0,
+};
+const chatTokens = { ...responsesTokens, cacheCreationInputTokens: 0 };
 it.each([
-  "messages-sse",
-  "responses-sse",
-  "chat-json",
-  "messages-json",
-  "responses-json",
-  "chat-sse",
-])("replays real %s through summary and full content parsers", async (name) => {
+  ["messages-sse", messagesTokens],
+  ["responses-sse", responsesTokens],
+  ["chat-json", chatTokens],
+  ["messages-json", messagesTokens],
+  ["responses-json", responsesTokens],
+  ["chat-sse", chatTokens],
+] as const)("replays real %s through summary and full content parsers", async (name, tokens) => {
   const events = recording(name);
   const first = events[0]!;
   const call = initialCall(first, await callIdentity(first), 1);
   const state: ProjectionCheckpoint = {};
   for (const event of events) applyObservation(call, state, event);
   expect(call.state).toBe("succeeded");
-  expect(call.providerName).toBeUndefined();
-  expect(call.cost).toEqual({ kind: "unknown" });
+  // No recording has an after-auth frame, so gpt-5.6-luna is only a model-name guess.
+  expect(call).toMatchObject({
+    requestModel: "gpt-5.6-luna",
+    providerName: "openai",
+    providerProvenance: "derived_from_model",
+    cost: { kind: "unknown" },
+    costProvenance: "unknown",
+  });
+  expect({
+    inputTokens: call.inputTokens,
+    outputTokens: call.outputTokens,
+    totalTokens: call.totalTokens,
+    reasoningTokens: call.reasoningTokens,
+    cachedInputTokens: call.cachedInputTokens,
+    cacheCreationInputTokens: call.cacheCreationInputTokens,
+  }).toEqual({
+    inputTokens: undefined,
+    totalTokens: undefined,
+    reasoningTokens: undefined,
+    cachedInputTokens: undefined,
+    cacheCreationInputTokens: undefined,
+    ...tokens,
+  });
   expect(call.capture.raw).toBe("complete");
   expect(call.capture.projectedThroughSequence).toBe(events.length);
   expect(call.usage.length).toBeGreaterThan(0);
@@ -47,6 +80,115 @@ it.each([
   expect(projection.responseState).toBe("decoded");
   expect(projection.output?.completion).toBe("CAPTURE_OK");
 });
+it.each([
+  [
+    "POST /v1/messages",
+    {
+      type: "message",
+      id: "message",
+      content: [],
+      stop_reason: "end_turn",
+      usage: {
+        input_tokens: 10,
+        cache_read_input_tokens: 20,
+        cache_creation_input_tokens: 30,
+        cache_creation: { ephemeral_5m_input_tokens: 25, ephemeral_1h_input_tokens: 5 },
+        output_tokens: 5,
+      },
+    },
+    { inputTokens: 60, outputTokens: 5, cachedInputTokens: 20, cacheCreationInputTokens: 30 },
+    ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"],
+  ],
+  [
+    "POST /v1/responses",
+    {
+      object: "response",
+      id: "response",
+      status: "completed",
+      output: [],
+      usage: {
+        input_tokens: 60,
+        input_tokens_details: { cached_tokens: 20, cache_write_tokens: 30 },
+        output_tokens: 5,
+        output_tokens_details: { reasoning_tokens: 2 },
+        total_tokens: 65,
+      },
+    },
+    {
+      inputTokens: 60,
+      outputTokens: 5,
+      totalTokens: 65,
+      reasoningTokens: 2,
+      cachedInputTokens: 20,
+      cacheCreationInputTokens: 30,
+    },
+    ["input_tokens", "input_tokens_details.cache_write_tokens"],
+  ],
+  [
+    "POST /v1/chat/completions",
+    {
+      choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 60,
+        prompt_tokens_details: { cached_tokens: 20, cached_creation_tokens: 30 },
+        completion_tokens: 5,
+        completion_tokens_details: { reasoning_tokens: 2 },
+        total_tokens: 65,
+      },
+    },
+    {
+      inputTokens: 60,
+      outputTokens: 5,
+      totalTokens: 65,
+      reasoningTokens: 2,
+      cachedInputTokens: 20,
+      cacheCreationInputTokens: 30,
+    },
+    ["prompt_tokens", "prompt_tokens_details.cached_creation_tokens"],
+  ],
+] as const)(
+  "normalizes %s usage into OpenRouter token fields beside the native counts",
+  async (route, response, tokens, nativeFields) => {
+    const base = recording("messages-json")[0]!;
+    const observed = (
+      sequence: number,
+      kind: CaptureObservationV1["kind"],
+      body?: unknown,
+    ): CaptureObservationV1 => {
+      const bytes = body === undefined ? new Uint8Array() : encoder.encode(JSON.stringify(body));
+      return {
+        ...base,
+        route,
+        sequence,
+        kind,
+        body: btoa(String.fromCharCode(...bytes)),
+        contentBytes: bytes.length,
+        ...(kind === "completion" ? { completionOutcome: "succeeded" } : {}),
+      };
+    };
+    const call = initialCall(observed(1, "request"), "call", 1);
+    const state: ProjectionCheckpoint = {};
+    for (const o of [
+      observed(1, "request", { model: base.requestedModel }),
+      observed(2, "response", response),
+      observed(3, "completion"),
+    ])
+      applyObservation(call, state, o);
+    expect(call.state).toBe("succeeded");
+    expect({
+      inputTokens: call.inputTokens,
+      outputTokens: call.outputTokens,
+      totalTokens: call.totalTokens,
+      reasoningTokens: call.reasoningTokens,
+      cachedInputTokens: call.cachedInputTokens,
+      cacheCreationInputTokens: call.cacheCreationInputTokens,
+    }).toEqual({ totalTokens: undefined, reasoningTokens: undefined, ...tokens });
+    for (const nativeField of nativeFields)
+      expect(call.usage).toContainEqual(
+        expect.objectContaining({ nativeField, finality: "final" }),
+      );
+  },
+);
 it("preserves partial usage without promoting aborted Messages counters", async () => {
   const events = recording("messages-sse").filter((e) => e.kind !== "completion");
   const terminal = events.findIndex(

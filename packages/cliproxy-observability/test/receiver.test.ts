@@ -125,14 +125,22 @@ it("commits raw independently, deduplicates exact retries, and projects from own
     more: false,
   });
   const projected = await s.backend.query(api.queries.getCall, args);
+  const identity = {
+    providerName: "openai",
+    providerProvenance: "derived_from_model",
+    cost: { kind: "unknown" },
+    costProvenance: "unknown",
+  };
   expect(JSON.parse(projected!.summaryJson)).toMatchObject({
     state: "succeeded",
+    ...identity,
     capture: { raw: "complete" },
   });
   const page = await s.backend.query(api.queries.pageRecentSummaries, {
     destinationId: args.destinationId,
   });
   expect(page.calls).toHaveLength(1);
+  expect(page.calls[0]).toMatchObject(identity);
   expect(page.done).toBe(true);
   expect(await s.backend.run((ctx) => ctx.db.query("receipts").collect())).toHaveLength(1);
 });
@@ -214,6 +222,8 @@ it("persists unmodified hook NDJSON and projects line callbacks across separate 
     totalTokens: 10,
     executionModel: "selected",
     selectedAuthId: "auth-id",
+    providerName: "openai",
+    providerProvenance: "derived_from_execution_protocol",
     capture: {
       raw: "complete",
       projection: "complete",
@@ -221,6 +231,41 @@ it("persists unmodified hook NDJSON and projects line callbacks across separate 
       capturePolicy: "hook-body-v1",
     },
   });
+});
+it("derives provider identity, cost provenance and cache writes when reading older summaries", async () => {
+  const s = setup();
+  await s.post(await envelope());
+  const callId = await callIdentity(events[0]!);
+  const args = { destinationId: events[0]!.destinationId, callId };
+  await projectPendingSegments(s.ctx, { ...s.options, callId });
+  // A 0.2 projection of a Claude execution that wrote cache stored none of the 0.3 fields.
+  await s.backend.run(async (ctx) => {
+    const row = (await ctx.db.query("calls").unique())!;
+    const older = JSON.parse(row.summaryJson) as Partial<ModelCallV1>;
+    delete older.providerName;
+    delete older.providerProvenance;
+    delete older.costProvenance;
+    delete older.cacheCreationInputTokens;
+    older.executionProtocol = "claude";
+    older.usage!.push({
+      ...older.usage![0]!,
+      nativeField: "cache_creation_input_tokens",
+      value: 30,
+    });
+    await ctx.db.patch("calls", row._id, { summaryJson: JSON.stringify(older) });
+  });
+  const upgraded = {
+    providerName: "anthropic",
+    providerProvenance: "derived_from_execution_protocol",
+    costProvenance: "unknown",
+    cacheCreationInputTokens: 30,
+  };
+  const stored = await s.backend.query(api.queries.getCall, args);
+  expect(JSON.parse(stored!.summaryJson)).toMatchObject(upgraded);
+  const page = await s.backend.query(api.queries.pageRecentSummaries, {
+    destinationId: args.destinationId,
+  });
+  expect(page.calls[0]).toMatchObject(upgraded);
 });
 it("rejects changed content under the same sequence identity", async () => {
   const s = setup();

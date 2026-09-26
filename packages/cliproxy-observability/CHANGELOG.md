@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Derive `providerName` with `providerProvenance` (`observed`, `derived_from_execution_protocol`, `derived_from_model` or `unavailable`) from one call's recorded facts through `providerIdentity` and the exported `PROVIDER_BY_EXECUTION_PROTOCOL` and `PROVIDER_BY_MODEL_PREFIX` tables. The model-name rule is a guess used only when no execution was recorded. `fromOpenRouterSpan` marks OpenRouter's provider `observed`.
+- Add `costProvenance`. Cost is never estimated: native calls stay `unknown`, and the OpenRouter adapter keeps `proxy_reported`.
+- Add `cacheCreationInputTokens` from Anthropic `cache_creation_input_tokens` and the Responses and Chat cache-write details, and keep those details as raw usage measurements. One table now states the normalization rule; `totalTokens` stays reported-only. Measurements name `client_protocol_usage_v2`.
+- Derive the new fields on read for summaries projected before 0.3.0 without rewriting stored rows. The structural `OpenRouterSpanInput` accepts `cacheCreationInputTokens`.
+- Native plugin/exporter source, native reported version (0.2.0), capture schema and ABI are unchanged. Updating the npm package does not require a native host upgrade.
+
 ## 0.2.2
 
 - Recognize valid Responses keepalive control frames without downgrading otherwise complete capture projection and terminal usage. Malformed sequence numbers and unrelated unknown or malformed events remain diagnostic.

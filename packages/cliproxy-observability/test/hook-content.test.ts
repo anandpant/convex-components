@@ -150,11 +150,18 @@ it("keeps capture loss explicit even when terminal usage is recorded", async () 
   expect(call.totalTokens).toBeUndefined();
 });
 
-it("records after-auth model and selected IDs without inventing provider or attempt joins", async () => {
-  const request = await observation(`{"stream":true}`, 1, "request");
+it("records after-auth model and selected IDs, deriving the provider only from the execution protocol", async () => {
+  const request = {
+    ...(await observation(`{"stream":true}`, 1, "request")),
+    requestedModel: "claude-opus-5-5",
+  };
   const call = initialCall(request, "call", 1);
   const state: ProjectionCheckpoint = {};
   applyObservation(call, state, request);
+  expect(call).toMatchObject({
+    providerName: "anthropic",
+    providerProvenance: "derived_from_model",
+  });
   const after = {
     ...(await observation(`{"token":"content"}`, 2, "request_after_auth")),
     executionModel: "selected-model",
@@ -174,8 +181,10 @@ it("records after-auth model and selected IDs without inventing provider or atte
     selectedAuthIndex: "auth-index",
     attemptDetail: "unavailable",
     correlation: {},
+    // The execution outranks the requested model's name.
+    providerName: "openai",
+    providerProvenance: "derived_from_execution_protocol",
   });
-  expect(call.providerName).toBeUndefined();
 });
 
 it("preserves every split including field-looking strings, UTF-8, CRLF and multiline JSON", () => {

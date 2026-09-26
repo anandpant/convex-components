@@ -1,36 +1,96 @@
 import type { CliproxyProjection, RecordValue } from "./types.js";
-import { count, object } from "./values.js";
-export function extractUsage(projection: CliproxyProjection, raw: RecordValue) {
-  // Anthropic reports disjoint uncached/cache creation/cache read input counts.
-  // Never manufacture totals, costs, or token counts from byte/text lengths.
-  projection.metadata.usage = raw;
-  const anthropic = projection.protocol === "anthropic_messages";
-
-  const responses = projection.protocol === "responses";
-
-  const nativeInput = count(raw.input_tokens);
-  const cacheRead = count(raw.cache_read_input_tokens);
-  const cacheCreated = count(raw.cache_creation_input_tokens);
-  const anthropicInput =
-    nativeInput !== undefined && cacheRead !== undefined && cacheCreated !== undefined
-      ? count(nativeInput + cacheRead + cacheCreated)
-      : undefined;
-  Object.assign(projection.scalars, {
-    inputTokens: anthropic ? anthropicInput : responses ? nativeInput : count(raw.prompt_tokens),
-    outputTokens: count(raw[anthropic || responses ? "output_tokens" : "completion_tokens"]),
-    totalTokens: count(raw.total_tokens),
-    cachedInputTokens: count(
-      anthropic
-        ? raw.cache_read_input_tokens
-        : object(raw[responses ? "input_tokens_details" : "prompt_tokens_details"]).cached_tokens,
-    ),
-    reasoningTokens: count(
-      object(raw[anthropic || responses ? "output_tokens_details" : "completion_tokens_details"])[
-        anthropic ? "thinking_tokens" : "reasoning_tokens"
+import { count } from "./values.js";
+export const TOKEN_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+  "reasoningTokens",
+  "cachedInputTokens",
+  "cacheCreationInputTokens",
+] as const;
+type TokenField = (typeof TOKEN_FIELDS)[number];
+/** Names the rule below in each usage measurement. */
+const USAGE_SEMANTICS = "client_protocol_usage_v2";
+/**
+ * The one token normalization rule, read from terminal native usage (`details.field` for
+ * nested counts). `sum` needs every listed field; `first` takes the first one reported.
+ * Input includes cache reads and writes, as OpenAI-style usage reports it. Anthropic reports
+ * them disjoint from `input_tokens`, so its input is their sum and any missing component
+ * leaves it unknown. `totalTokens` is only ever the reported `total_tokens`; Anthropic reports
+ * none and it is never summed. Nothing is manufactured from byte or text lengths.
+ */
+const TOKEN_NORMALIZATION: Record<
+  Exclude<CliproxyProjection["protocol"], "unknown">,
+  Record<TokenField, { sum: readonly string[] } | { first: readonly string[] }>
+> = {
+  anthropic_messages: {
+    inputTokens: {
+      sum: ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"],
+    },
+    outputTokens: { first: ["output_tokens"] },
+    totalTokens: { first: ["total_tokens"] },
+    reasoningTokens: { first: ["output_tokens_details.thinking_tokens"] },
+    cachedInputTokens: { first: ["cache_read_input_tokens"] },
+    cacheCreationInputTokens: { first: ["cache_creation_input_tokens"] },
+  },
+  responses: {
+    inputTokens: { first: ["input_tokens"] },
+    outputTokens: { first: ["output_tokens"] },
+    totalTokens: { first: ["total_tokens"] },
+    reasoningTokens: { first: ["output_tokens_details.reasoning_tokens"] },
+    cachedInputTokens: { first: ["input_tokens_details.cached_tokens"] },
+    cacheCreationInputTokens: {
+      first: [
+        "input_tokens_details.cache_write_tokens",
+        "input_tokens_details.cache_creation_tokens",
       ],
-    ),
-  });
-  projection.metadata.tokenSemantics = anthropic
-    ? "input_is_sum_of_reported_input_cache_creation_cache_read; cached_input_is_cache_read; missing_components_mean_unknown; no_synthesized_total"
-    : "input_includes_reported_cached_input; terminal_usage_snapshot";
+    },
+  },
+  chat_completions: {
+    inputTokens: { first: ["prompt_tokens"] },
+    outputTokens: { first: ["completion_tokens"] },
+    totalTokens: { first: ["total_tokens"] },
+    reasoningTokens: { first: ["completion_tokens_details.reasoning_tokens"] },
+    cachedInputTokens: { first: ["prompt_tokens_details.cached_tokens"] },
+    cacheCreationInputTokens: {
+      first: [
+        "prompt_tokens_details.cache_write_tokens",
+        "prompt_tokens_details.cached_creation_tokens",
+        "prompt_tokens_details.cache_creation_tokens",
+      ],
+    },
+  },
+};
+export function normalizeUsage(
+  protocol: keyof typeof TOKEN_NORMALIZATION,
+  reported: ReadonlyMap<string, number>,
+): Partial<Record<TokenField, number>> {
+  const out: Partial<Record<TokenField, number>> = {};
+  for (const field of TOKEN_FIELDS) {
+    const rule = TOKEN_NORMALIZATION[protocol][field];
+    out[field] =
+      "sum" in rule
+        ? rule.sum.every((name) => reported.has(name))
+          ? count(rule.sum.reduce((total, name) => total + reported.get(name)!, 0))
+          : undefined
+        : rule.first.map((name) => reported.get(name)).find((value) => value !== undefined);
+  }
+  return out;
+}
+/** Native counts keyed as usage measurements name them. */
+function reportedCounts(raw: RecordValue): Map<string, number> {
+  const reported = new Map<string, number>();
+  for (const [key, value] of Object.entries(raw)) {
+    if (count(value) !== undefined) reported.set(key, value as number);
+    else if (value && typeof value === "object" && !Array.isArray(value))
+      for (const [field, nested] of Object.entries(value))
+        if (count(nested) !== undefined) reported.set(`${key}.${field}`, nested as number);
+  }
+  return reported;
+}
+export function extractUsage(projection: CliproxyProjection, raw: RecordValue) {
+  projection.metadata.usage = raw;
+  projection.metadata.tokenSemantics = USAGE_SEMANTICS;
+  if (projection.protocol !== "unknown")
+    Object.assign(projection.scalars, normalizeUsage(projection.protocol, reportedCounts(raw)));
 }

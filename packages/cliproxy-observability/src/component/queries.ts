@@ -1,4 +1,5 @@
-import type { ModelCallV1 } from "../model-call/index.js";
+import { providerIdentity, type ModelCallV1 } from "../model-call/index.js";
+import { normalizeUsage } from "../protocols/usage.js";
 import { v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server.js";
 async function summaryView(
@@ -12,6 +13,18 @@ async function summaryView(
   },
 ) {
   const summary = JSON.parse(row.summaryJson) as ModelCallV1;
+  // Summaries projected before 0.3.0 lack these; derive them from the facts they recorded.
+  if (summary.providerProvenance === undefined) Object.assign(summary, providerIdentity(summary));
+  summary.costProvenance ??= summary.cost.kind;
+  if (
+    summary.capture.usage === "complete" &&
+    summary.clientProtocol !== undefined &&
+    summary.clientProtocol !== "unknown"
+  )
+    summary.cacheCreationInputTokens ??= normalizeUsage(
+      summary.clientProtocol,
+      new Map(summary.usage.map((measurement) => [measurement.nativeField, measurement.value])),
+    ).cacheCreationInputTokens;
   if (summary.state === "in_progress" && row.terminalSequence === undefined) {
     const source = await ctx.db
       .query("sourceStatus")

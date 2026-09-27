@@ -117,6 +117,8 @@ The query contract separates discovery from content export:
 
 Every page returns `cursor` and `done`. Correlation pages emit at most seven summaries, trace pages at most six, and every call reads at most eight full documents including lookahead and trace-cursor resolution. Summary strings are clipped to 128 characters and named in `truncatedFields`. The serialized page stays at or below 32 KiB and advances its cursor from the last emitted row when the byte limit shortens a page. Content, raw attributes, events, and links appear only in `exportFullSpan`.
 
+Each summary carries the provider-native token counts its span recorded: `inputTokens`, `outputTokens`, `totalTokens`, `reasoningTokens`, and `cachedInputTokens`. A count the span did not record is absent, never 0. OpenRouter does not record cache writes, so no span or summary has a cache-write count.
+
 The explicit `opencodeSession` correlation reads only `trace.metadata.opencode_session_id`. It does not treat every OpenRouter `session.id` as an OpenCode session. New run, job, root-execution, and OpenCode-session indexes return `status: "not_ready"` until the bounded historical backfill reports ready through `getCorrelationProjectionCoverage`. Ingestion starts the backfill immediately on an upgraded deployment; the daily maintenance job retries it. Empty deployments are ready without waiting for the cron. This prevents a partial index from looking like an empty result.
 
 Component query functions are internal references from the host's perspective. The executable [`example/convex/traces.ts`](example/convex/traces.ts) exposes only `internalQuery` wrappers for CLI use. A product-facing wrapper must authorize its host record before it passes an opaque correlation value to the component.

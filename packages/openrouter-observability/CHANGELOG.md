@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- Summaries from `pageTraceSummaries`, `pageCorrelationSummaries`, and `pageRecentSummaries` now carry `reasoningTokens` and `cachedInputTokens`. Every span already stored them; only a full-span export returned them before. A count the span did not record stays absent, never 0.
+- OpenRouter reports no cache-write count, so neither spans nor summaries have one.
+
 ## 0.4.0
 
 - Accepts `RETENTION_DAYS: "indefinite"` to keep spans and their deduplication keys indefinitely. Cleanup is not scheduled, and already-queued cleanup continuations delete nothing and stop.

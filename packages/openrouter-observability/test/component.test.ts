@@ -379,6 +379,66 @@ describe("OpenRouter observability component", () => {
     );
   });
 
+  it("projects the reasoning and cached-input counts spans store into every summary page", async () => {
+    const backend = createBackend();
+    const fixture = loadFixture("003-reasoning-luna.json");
+    const traceId = "b633b7fd35845c40143e92b76c02a978";
+    // The fixture's generation records both counts as 0. A copy on another trace records a
+    // generation that reasoned and read cached input.
+    const countedTraceId = "c633b7fd35845c40143e92b76c02a978";
+    const counted = JSON.parse(fixture.replaceAll(traceId, countedTraceId)) as {
+      resourceSpans: Array<{
+        scopeSpans: Array<{
+          spans: Array<{ attributes?: Array<{ key: string; value: unknown }> }>;
+        }>;
+      }>;
+    };
+    const values: Record<string, number> = {
+      "gen_ai.usage.output_tokens.reasoning": 4,
+      "gen_ai.usage.input_tokens.cached": 12,
+    };
+    for (const { scopeSpans } of counted.resourceSpans)
+      for (const { spans } of scopeSpans)
+        for (const { attributes = [] } of spans)
+          for (const attribute of attributes)
+            if (attribute.key in values) attribute.value = { intValue: values[attribute.key] };
+    expect((await post(backend, fixture)).status).toBe(202);
+    expect((await post(backend, JSON.stringify(counted))).status).toBe(202);
+
+    type Summary = {
+      traceId: string;
+      name: string;
+      reasoningTokens?: number;
+      cachedInputTokens?: number;
+    };
+    const counts = (page: Summary[]) =>
+      Object.fromEntries(
+        page
+          .filter((summary) => summary.name === "fixture-reasoning")
+          .map((summary) => [
+            summary.traceId,
+            [summary.reasoningTokens, summary.cachedInputTokens],
+          ]),
+      );
+    const expected = { [traceId]: [0, 0], [countedTraceId]: [4, 12] };
+    const trace = async (id: string) =>
+      (await backend.query(api.queries.pageTraceSummaries, { traceId: id })).page;
+    expect(counts([...(await trace(traceId)), ...(await trace(countedTraceId))])).toEqual(expected);
+    const byRequest = await backend.query(api.queries.pageCorrelationSummaries, {
+      correlation: { kind: "request", requestId: "fixture-req-003" },
+    });
+    if (byRequest.status !== "ready") throw new Error("request projection must be ready");
+    expect(counts(byRequest.page)).toEqual(expected);
+    expect(counts((await backend.query(api.queries.pageRecentSummaries, {})).page)).toEqual(
+      expected,
+    );
+    // The provider attempt span records neither count, so its summary has neither, never 0.
+    const attempt = (await trace(traceId)).find((summary) => summary.name !== "fixture-reasoning");
+    expect(attempt).toBeDefined();
+    expect(attempt).not.toHaveProperty("reasoningTokens");
+    expect(attempt).not.toHaveProperty("cachedInputTokens");
+  });
+
   it.each([
     ["empty", 0],
     ["exact page", 6],

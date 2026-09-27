@@ -75,6 +75,8 @@ function summarize(span: Doc<"spans">) {
     inputTokens: span.inputTokens,
     outputTokens: span.outputTokens,
     totalTokens: span.totalTokens,
+    reasoningTokens: span.reasoningTokens,
+    cachedInputTokens: span.cachedInputTokens,
     totalCost: span.totalCost,
     inputUtf8Bytes:
       span.input === undefined ? undefined : new TextEncoder().encode(span.input).length,

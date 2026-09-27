@@ -8,7 +8,11 @@ import type {
 import type { ComponentApi } from "./component/_generated/component.js";
 import type { CaptureObservationV1 } from "./capture/index.js";
 import { MAX_ENVELOPE_BYTES, validateSegment, sha256 } from "./capture/index.js";
-import type { ModelCallV1, PrivateContentReference } from "./model-call/index.js";
+import {
+  providerIdentity,
+  type ModelCallV1,
+  type PrivateContentReference,
+} from "./model-call/index.js";
 import type { PrivateCaptureStorage } from "./content/index.js";
 import { nanoTime, protocolForRoute, PARSER_VERSION } from "./protocols/index.js";
 export * from "./model-call/index.js";
@@ -63,6 +67,7 @@ export function initialCall(
   callId: string,
   receivedAt: number,
 ): ModelCallV1 {
+  const requestModel = o.requestedModel?.slice(0, 256);
   return {
     schemaVersion: 1,
     source: "cliproxy",
@@ -78,7 +83,8 @@ export function initialCall(
     executionId: o.requestId,
     sourceTraceId: o.sourceTraceId,
     traceId: o.correlation?.traceId,
-    requestModel: o.requestedModel?.slice(0, 256),
+    requestModel,
+    ...providerIdentity({ requestModel }),
     operation:
       o.route === "GET /v1/models"
         ? "discovery"
@@ -93,6 +99,7 @@ export function initialCall(
     correlationConflicts: o.correlationConflicts ?? [],
     usage: [],
     cost: { kind: "unknown" },
+    costProvenance: "unknown",
     attemptDetail: "unavailable",
     capture: {
       raw: "partial",

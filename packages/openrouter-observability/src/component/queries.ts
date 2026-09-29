@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel.js";
 import { query, type QueryCtx } from "./_generated/server.js";
+import { storedCacheWriteTokens } from "./parser.js";
 
 // A page reads no more than eight full documents. Returned summaries omit all
 // stored content and cap display strings, so response size does not follow span size.
@@ -77,7 +78,10 @@ function summarize(span: Doc<"spans">) {
     totalTokens: span.totalTokens,
     reasoningTokens: span.reasoningTokens,
     cachedInputTokens: span.cachedInputTokens,
+    cacheCreationInputTokens: storedCacheWriteTokens(span.attributes),
     totalCost: span.totalCost,
+    isByok: span.isByok,
+    byokInferenceUsageCost: span.byokInferenceUsageCost,
     inputUtf8Bytes:
       span.input === undefined ? undefined : new TextEncoder().encode(span.input).length,
     outputUtf8Bytes:

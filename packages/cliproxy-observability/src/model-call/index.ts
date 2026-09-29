@@ -190,6 +190,9 @@ export type OpenRouterSpanInput = {
   receivedAt: number;
   totalCost?: number;
   openrouterUsageCost?: number;
+  isByok?: boolean;
+  /** What a BYOK call's inference cost on the caller's own provider key, as OpenRouter reports it. */
+  byokInferenceUsageCost?: number;
   traceId?: string;
   spanId?: string;
   parentSpanId?: string;
@@ -242,10 +245,15 @@ export function fromOpenRouterSpan(span: OpenRouterSpanInput): ModelCallV1 {
         semanticsVersion: "stored_openrouter_span_v1",
       });
   }
+  const isCost = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
   const reported = span.totalCost ?? span.openrouterUsageCost;
+  // A BYOK charge is only OpenRouter's fee: the provider bills the inference to the caller's own
+  // key. Without that inference cost the call's cost is unknown, not the fee alone.
+  const inference = span.isByok === true ? span.byokInferenceUsageCost : 0;
   const cost: ModelCallCost =
-    typeof reported === "number" && Number.isFinite(reported) && reported >= 0
-      ? { kind: "proxy_reported", currency: "USD", total: String(reported) }
+    isCost(reported) && isCost(inference)
+      ? { kind: "proxy_reported", currency: "USD", total: String(reported + inference) }
       : { kind: "unknown" };
   return {
     schemaVersion: 1,

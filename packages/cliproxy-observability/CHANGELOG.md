@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- `fromOpenRouterSpan` adds a BYOK call's `byokInferenceUsageCost` to OpenRouter's charge, so `cost.total` is the call's inference cost instead of OpenRouter's fee alone. A BYOK span without that cost now has `cost.kind: "unknown"`. The structural `OpenRouterSpanInput` accepts `isByok` and `byokInferenceUsageCost`.
+- Native plugin/exporter source, native reported version (0.2.0), capture schema and ABI are unchanged. Updating the npm package does not require a native host upgrade.
+
 ## 0.3.0
 
 - `ModelCallV1` contract change: native CLIProxy calls now carry a derived `providerName`, which was always absent for them before. New optional fields are `providerProvenance` (`observed`, `derived_from_wire_format`, `derived_from_model` or `unavailable`), `costProvenance` (mirrors `cost.kind`) and `cacheCreationInputTokens`. Anthropic Messages `inputTokens` now counts an absent cache read or write as 0 instead of leaving input unknown, and usage measurements name `client_protocol_usage_v2`. Code that constructs `ModelCallV1` needs no new fields.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Summaries carry `cacheCreationInputTokens`, read from the span's stored `gen_ai.usage.input_tokens.cache_write` attribute (or `trace.metadata.openrouter_generation.cache_write_tokens`), so spans stored before this release report it too. 0.4.1 said OpenRouter records no cache writes; it does, and `inputTokens` already includes them.
+- Summaries carry `isByok` and `byokInferenceUsageCost`. On a BYOK call `totalCost` is only OpenRouter's fee; `byokInferenceUsageCost` is the inference billed to the caller's own provider key.
+- A field the span did not record stays absent. Stored spans and the schema are unchanged.
+
 ## 0.4.1
 
 - Summaries from `pageTraceSummaries`, `pageCorrelationSummaries`, and `pageRecentSummaries` now carry `reasoningTokens` and `cachedInputTokens`. Every span already stored them; only a full-span export returned them before. A count the span did not record stays absent, never 0.

@@ -54,7 +54,7 @@ Token fields use the OpenRouter names and unit (tokens per call): `inputTokens`,
 
 Every reported native count also stays in `usage` as a `UsageMeasurement` with its `nativeField`, `finality` and `semanticsVersion: "client_protocol_usage_v2"`.
 
-Cost is never estimated. Native calls keep `cost: { kind: "unknown" }` with `costProvenance: "unknown"`, because CLIProxy's client protocols report no price. `fromOpenRouterSpan` keeps OpenRouter's charge as a `proxy_reported` USD cost.
+Cost is never estimated. Native calls keep `cost: { kind: "unknown" }` with `costProvenance: "unknown"`, because CLIProxy's client protocols report no price. `fromOpenRouterSpan` keeps OpenRouter's charge as a `proxy_reported` USD cost. On a BYOK call that charge is only OpenRouter's fee, so the adapter adds `byokInferenceUsageCost`, the inference billed to the caller's own provider key; a BYOK span without it has an `unknown` cost.
 
 `providerProvenance` and `costProvenance` are optional in `ModelCallV1`. Summaries projected by 0.3.0 or later store them. For older summaries, `getCall` and `pageRecentSummaries` derive them from the facts those summaries recorded. The same reads apply the current token rule to an older summary's final native counts, which adds `cacheCreationInputTokens` and counts absent Messages cache counts as 0. Stored rows are not rewritten.
 
@@ -65,7 +65,7 @@ Projected summaries of the real recordings measure 1,783 to 2,934 bytes. A strea
 - The OpenRouter component stores costs as bare numbers with no currency; `fromOpenRouterSpan` labels them USD. CLIProxy records no cost.
 - Provenance exists only in `ModelCallV1`. The OpenRouter component's own summaries carry neither provider nor cost provenance.
 - OpenRouter's `providerName` is the upstream it routed to, as OpenRouter names it (for example `OpenAI`). CLIProxy's is a lowercase API family or model-name guess. It is not authoritative until the native plugin records the selected auth's provider.
-- The OpenRouter recordings here carry no cache-write count, so `cacheCreationInputTokens` stays unset for OpenRouter calls. The structural `OpenRouterSpanInput` accepts it if a host supplies one.
+- OpenRouter component summaries from 0.4.2 carry `cacheCreationInputTokens`, `isByok`, and `byokInferenceUsageCost`; the structural `OpenRouterSpanInput` accepts all three. Older summaries lack them, so their cache writes stay unset and a BYOK call's cost is its fee alone.
 - OpenRouter summaries expose input, output and total tokens; its cached and reasoning counts are only on full spans (`exportFullSpan`).
 
 ## Parser provenance

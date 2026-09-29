@@ -48,6 +48,23 @@ it("carries OpenRouter cache writes and never guesses a provider or cost it did 
   });
   expect(call.usage).toMatchObject([{ nativeField: "cacheCreationInputTokens", value: 12 }]);
 });
+it("counts a BYOK call's provider inference in its cost, never its fee alone", () => {
+  const byok = (byokInferenceUsageCost?: number) =>
+    fromOpenRouterSpan({
+      _id: "byok",
+      receivedAt: 1,
+      providerName: "Google AI Studio",
+      totalCost: 0,
+      isByok: true,
+      byokInferenceUsageCost,
+    }).cost;
+  expect(byok(0.0003885)).toEqual({ kind: "proxy_reported", currency: "USD", total: "0.0003885" });
+  expect(byok()).toEqual({ kind: "unknown" });
+  // A non-BYOK call's charge already is its inference cost.
+  expect(
+    fromOpenRouterSpan({ _id: "paid", receivedAt: 1, totalCost: 0.002, isByok: false }).cost,
+  ).toEqual({ kind: "proxy_reported", currency: "USD", total: "0.002" });
+});
 it("labels legacy gateway rows and leaves OAuth cost unknown", () => {
   expect(
     fromLegacyCliproxySpan({

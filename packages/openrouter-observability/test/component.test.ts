@@ -439,6 +439,56 @@ describe("OpenRouter observability component", () => {
     expect(attempt).not.toHaveProperty("cachedInputTokens");
   });
 
+  it("carries cache writes and BYOK inference cost into summaries", async () => {
+    const backend = createBackend();
+    const fixture = loadFixture("003-reasoning-luna.json");
+    const traceId = "b633b7fd35845c40143e92b76c02a978";
+    // A BYOK generation that wrote the prompt cache, recorded as OpenRouter reports it today.
+    const byokTraceId = "d633b7fd35845c40143e92b76c02a978";
+    const byok = JSON.parse(fixture.replaceAll(traceId, byokTraceId)) as {
+      resourceSpans: Array<{
+        scopeSpans: Array<{
+          spans: Array<{ name: string; attributes?: Array<{ key: string; value: unknown }> }>;
+        }>;
+      }>;
+    };
+    for (const { scopeSpans } of byok.resourceSpans)
+      for (const { spans } of scopeSpans)
+        for (const span of spans)
+          if (span.name === "fixture-reasoning")
+            span.attributes = [
+              ...(span.attributes ?? []),
+              { key: "gen_ai.usage.input_tokens.cache_write", value: { intValue: 759 } },
+              {
+                key: "trace.metadata.openrouter_generation.cache_write_tokens",
+                value: { intValue: 759 },
+              },
+              { key: "trace.metadata.openrouter_generation.is_byok", value: { boolValue: true } },
+              {
+                key: "trace.metadata.openrouter_generation.byok_usage_inference",
+                value: { doubleValue: 0.0003885 },
+              },
+            ];
+    expect((await post(backend, fixture)).status).toBe(202);
+    expect((await post(backend, JSON.stringify(byok))).status).toBe(202);
+
+    const generation = async (id: string) =>
+      (await backend.query(api.queries.pageTraceSummaries, { traceId: id })).page.find(
+        (summary) => summary.name === "fixture-reasoning",
+      );
+    expect(await generation(byokTraceId)).toMatchObject({
+      cacheCreationInputTokens: 759,
+      isByok: true,
+      byokInferenceUsageCost: 0.0003885,
+    });
+    // A span that recorded none of them has none, never 0 or false.
+    const plain = await generation(traceId);
+    expect(plain).toBeDefined();
+    expect(plain).not.toHaveProperty("cacheCreationInputTokens");
+    expect(plain).not.toHaveProperty("isByok");
+    expect(plain).not.toHaveProperty("byokInferenceUsageCost");
+  });
+
   it.each([
     ["empty", 0],
     ["exact page", 6],

@@ -491,6 +491,31 @@ export function projectStoredCorrelationAttributes(attributes: ReadonlyArray<Sto
   };
 }
 
+// OpenRouter reports cache-write input tokens under both keys. Ingestion does not project either,
+// so every stored span, old or new, keeps the count among its attributes.
+const CACHE_WRITE_KEYS = [
+  "gen_ai.usage.input_tokens.cache_write",
+  "trace.metadata.openrouter_generation.cache_write_tokens",
+] as const;
+
+/** A stored span's cache-write input tokens: the first key present, when it holds one integer. */
+export function storedCacheWriteTokens(attributes: ReadonlyArray<StoredAttribute>) {
+  for (const key of CACHE_WRITE_KEYS) {
+    const matches = attributes.filter((attribute) => attribute.key === key);
+    if (matches.length === 0) continue;
+    const [attribute] = matches;
+    if (matches.length !== 1 || !attribute) return undefined;
+    let value: unknown;
+    try {
+      value = JSON.parse(attribute.valueJson) as unknown;
+    } catch {
+      return undefined;
+    }
+    return isRecord(value) ? typedInteger(value) : undefined;
+  }
+  return undefined;
+}
+
 export function assertSpanAttributeReconstruction(
   originalAttributes: unknown,
   parsed: ParsedOpenRouterSpan,

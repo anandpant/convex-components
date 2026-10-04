@@ -72,16 +72,45 @@ func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
 	o := &Outbox{db: db, path: path, reserve: reserve, budget: maxBytes}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,payload BLOB NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,state TEXT NOT NULL DEFAULT 'pending'); CREATE INDEX IF NOT EXISTS events_call ON events(destination,instance,boot,request_id,sequence);`)
 	if err == nil {
-		_, err = db.Exec("PRAGMA max_page_count = " + itoa(maxBytes/4096))
+		// SQLite's hard ceiling applies to delivery bookkeeping too. Keep bounded
+		// drain space outside the event-admission budget so a full legacy database
+		// can persist its first batch and exact ACK without admitting more events.
+		_, err = db.Exec("PRAGMA max_page_count = " + itoa((maxBytes+min(maxBytes/8, 8<<20))/4096))
 	}
 	if err == nil {
 		err = o.initDelivery()
+	}
+	if err == nil {
+		err = o.compactAtAdmissionCeiling()
 	}
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
 	return o, nil
+}
+
+func (o *Outbox) compactAtAdmissionCeiling() error {
+	var pages, pageSize int64
+	if err := o.db.QueryRow("PRAGMA page_count").Scan(&pages); err != nil {
+		return err
+	}
+	if err := o.db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		return err
+	}
+	allocated := pages * pageSize
+	if allocated < o.budget-min(o.budget/8, 1<<20) {
+		return nil
+	}
+	// Clearing ACKed payloads can leave sparse live pages, which incremental
+	// vacuum cannot repack. Compact only at startup, before admission/delivery,
+	// with the same conservative temporary-space check as the legacy migration.
+	var fs syscall.Statfs_t
+	if syscall.Statfs(filepath.Dir(o.path), &fs) != nil || uint64(fs.Bavail)*uint64(fs.Bsize) < o.reserve+uint64(allocated)*2 {
+		return nil // Insufficient compaction space must not disable pending delivery.
+	}
+	_, err := o.db.Exec("VACUUM")
+	return err
 }
 func itoa(n int64) string      { b, _ := json.Marshal(n); return string(b) }
 func (o *Outbox) Close() error { return o.db.Close() }
@@ -158,7 +187,11 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var pages, freePages int64
-		if !(len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_")) && (tx.QueryRow("PRAGMA page_count").Scan(&pages) != nil || tx.QueryRow("PRAGMA freelist_count").Scan(&freePages) != nil || (pages-freePages)*4096+int64(len(raw)*2) > o.budget-min(o.budget/8, 1<<20)) {
+		admissionBudget := o.budget - min(o.budget/8, 1<<20)
+		if len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_") {
+			admissionBudget = o.budget // Control gaps cannot consume drain bookkeeping space.
+		}
+		if tx.QueryRow("PRAGMA page_count").Scan(&pages) != nil || tx.QueryRow("PRAGMA freelist_count").Scan(&freePages) != nil || (pages-freePages)*4096+int64(len(raw)*2) > admissionBudget {
 			http.Error(w, "reserved control capacity", 507)
 			return
 		}

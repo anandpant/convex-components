@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
+import grp
 import socket
 import sqlite3
 import statistics
@@ -123,10 +125,22 @@ def nginx_config():
     for route in ['/v1/messages','/v1/messages/count_tokens','/v1/responses','/v1/chat/completions','/v1/models']:
         method='GET' if route.endswith('models') else 'POST'
         locations+=f'location = {route} {{ limit_except {method} {{ deny all; }} {proxy} }}\n'
-    return '''worker_processes 1; pid /tmp/capture-proof/nginx.pid;
-error_log /tmp/capture-proof/nginx-error.log warn;
-events { worker_connections 1024; }
-http { access_log off; client_max_body_size 2m; '''+'\n'.join(maps)+f'''
+    # Compiled absolute defaults ignore -p and can chown a live nginx's directories.
+    runtime = ROOT / 'nginx'
+    user = pwd.getpwuid(os.geteuid()).pw_name
+    group = grp.getgrgid(os.getegid()).gr_name
+    worker = f'user {user} {group};\n' if os.geteuid() == 0 else ''
+    return worker + f'''worker_processes 1; pid {runtime}/nginx.pid;
+lock_file {runtime}/nginx.lock;
+error_log {runtime}/error.log warn;
+events {{ worker_connections 1024; }}
+http {{ access_log off; client_max_body_size 2m;
+client_body_temp_path {runtime}/client_body;
+proxy_temp_path {runtime}/proxy;
+fastcgi_temp_path {runtime}/fastcgi;
+uwsgi_temp_path {runtime}/uwsgi;
+scgi_temp_path {runtime}/scgi;
+'''+'\n'.join(maps)+f'''
 server {{ listen 127.0.0.1:8318; {locations} location / {{ return 404; }} }}
 server {{ listen 127.0.0.1:8319; location / {{
  proxy_http_version 1.1; proxy_buffering off; proxy_set_header Upgrade $http_upgrade;
@@ -136,6 +150,20 @@ server {{ listen 127.0.0.1:8319; location / {{
  proxy_set_header X-Meshix-Capture-Revision "";
  proxy_pass http://127.0.0.1:8317;
 }} }} }}'''
+
+
+def prepare_nginx_runtime():
+    runtime = ROOT / 'nginx'
+    runtime.mkdir(mode=0o700)
+    for name in ['client_body', 'proxy', 'fastcgi', 'uwsgi', 'scgi']:
+        (runtime / name).mkdir(mode=0o700)
+
+
+def nginx_command(*args):
+    runtime = ROOT / 'nginx'
+    # -e also isolates early errors before nginx has parsed error_log.
+    return ['nginx', '-p', str(runtime) + '/', '-e', str(runtime / 'error.log'),
+            '-c', str(ROOT / 'nginx.conf'), *args]
 
 
 def events():
@@ -165,6 +193,7 @@ def percentiles(values):
 
 def main():
     ROOT.mkdir(mode=0o700);(ROOT/'auth').mkdir();(ROOT/'outbox').mkdir(mode=0o700)
+    prepare_nginx_runtime()
     capture_config={'enabled':True,'instanceId':'isolated-stock-proof','revision':'proof-v1','socket':str(ROOT/'outbox/capture.sock'),'bindings':[{'key':DEV,'destinationId':'harness-dev','deployment':DEPLOYMENT,'environment':'dev'},{'key':PROD,'destinationId':'harness-prod','deployment':'https://harness-prod.convex.site','environment':'prod'}]}
     (ROOT/'capture.json').write_text(json.dumps(capture_config));(ROOT/'capture.json').chmod(0o600)
     (ROOT/'nginx.conf').write_text(nginx_config())
@@ -182,7 +211,8 @@ def main():
     def stop_proc(p):p.terminate();p.wait(timeout=10)
     try:
         exporter=start_exporter()
-        nginx=subprocess.Popen(['nginx','-c',str(ROOT/'nginx.conf'),'-g','daemon off;']);procs.append(nginx);wait_port(8318)
+        subprocess.run(nginx_command('-t'), check=True)
+        nginx=subprocess.Popen(nginx_command('-g','daemon off;'));procs.append(nginx);wait_port(8318)
         stock=start_stock(False)
         for enabled in [False,True]:
             if enabled:

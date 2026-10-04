@@ -22,6 +22,20 @@ import (
 
 const MaxSegment = 1408 << 10
 
+const terminalBatchHistory = 1024
+
+// Event identity/digest receipts are retained independently of delivery history.
+// Never trim a batch that can still be retried or acknowledged.
+func trimTerminalBatches(db interface {
+	Exec(string, ...any) (sql.Result, error)
+}) (int64, error) {
+	result, err := db.Exec("DELETE FROM batches WHERE identity IN (SELECT identity FROM batches WHERE state IN ('delivered','superseded') ORDER BY rowid DESC LIMIT 256 OFFSET ?)", terminalBatchHistory)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 type Destination struct {
 	ID         string `json:"destinationId"`
 	Deployment string `json:"deploymentId"`
@@ -117,6 +131,15 @@ func (o *Outbox) initDelivery() error {
 	}
 	if err != nil {
 		return err
+	}
+	for {
+		trimmed, err := trimTerminalBatches(o.db)
+		if err != nil {
+			return err
+		}
+		if trimmed == 0 {
+			break
+		}
 	}
 	dir := filepath.Join(filepath.Dir(o.path), "segments")
 	if err = os.MkdirAll(dir, 0700); err != nil {
@@ -297,6 +320,16 @@ func (o *Outbox) nextBatch(d Destination) (*deliveryBatch, error) {
 	if err != sql.ErrNoRows {
 		return nil, err
 	}
+	// One new replica per destination. A batch in backoff must keep its original
+	// boundaries, rather than letting retries allocate replicas for the whole queue.
+	var waiting int
+	err = o.db.QueryRow("SELECT 1 FROM batches WHERE destination=? AND state IN ('pending','delivering','quarantined') LIMIT 1", d.ID).Scan(&waiting)
+	if err == nil {
+		return nil, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
 	// Preserve every persisted batch boundary across retry/restart. Never overlap a batch.
 	tx, err := o.db.Begin()
 	if err != nil {
@@ -351,7 +384,7 @@ func (o *Outbox) nextBatch(d Destination) (*deliveryBatch, error) {
 	identityRaw, _ := json.Marshal([]any{d.ID, d.Instance, first.Boot, first.RequestID, first.Sequence, through})
 	digest := Digest(content)
 	path := filepath.Join(filepath.Dir(o.path), "segments", digest+".ndjson")
-	if !o.segmentCapacity(tx, int64(len(content))) {
+	if !o.segmentCapacity(int64(len(content))) {
 		return nil, errors.New("segment disk budget")
 	}
 	if err = durableSegment(path, content); err != nil {
@@ -457,10 +490,25 @@ func (o *Outbox) ackBatch(b deliveryBatch) error {
 	if _, err = tx.Exec("UPDATE batches SET state='delivered',last_status=200 WHERE identity=?", b.Identity); err != nil {
 		return err
 	}
+	if _, err = trimTerminalBatches(tx); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	_, _ = o.db.Exec("PRAGMA incremental_vacuum(256)")
+	// This pragma yields a row per reclaimed page. Exec only steps the first row
+	// in go-sqlite3; exhaust the result so the bounded vacuum actually completes.
+	rows, err := o.db.Query("PRAGMA incremental_vacuum(256)")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
 	_, _ = o.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return os.Remove(b.Path)
 }
@@ -485,20 +533,14 @@ func (o *Outbox) deliveryStatus() []map[string]any {
 	}
 	return result
 }
-func (o *Outbox) segmentCapacity(tx *sql.Tx, extra int64) bool {
-	var segments int64
-	if tx.QueryRow("SELECT coalesce(sum(bytes),0) FROM batches WHERE state IN ('pending','delivering','quarantined')").Scan(&segments) != nil {
-		return false
-	}
-	total := segments + extra
-	for _, path := range []string{o.path, o.path + "-wal", o.path + "-shm"} {
-		if info, err := os.Stat(path); err == nil {
-			total += info.Size()
-		}
-	}
+func (o *Outbox) segmentCapacity(extra int64) bool {
+	// Draining already committed observations is not new admission. The SQLite
+	// admission ceiling must not prevent the exact ACK that releases their pages.
+	// nextBatch bounds new replicas to one MaxSegment per destination; retain the
+	// independent filesystem reserve for the replica and SQLite bookkeeping.
 	var fs syscall.Statfs_t
 	headroom := min(o.budget/8, 8<<20)
-	return total+headroom <= o.budget && syscall.Statfs(filepath.Dir(o.path), &fs) == nil && uint64(fs.Bavail)*uint64(fs.Bsize) > o.reserve+uint64(extra)+uint64(headroom)
+	return extra > 0 && extra <= MaxSegment && syscall.Statfs(filepath.Dir(o.path), &fs) == nil && uint64(fs.Bavail)*uint64(fs.Bsize) > o.reserve+uint64(extra)+uint64(headroom)
 }
 func (o *Outbox) reconcileSegments(dir string) error {
 	handle, err := os.Open(dir)

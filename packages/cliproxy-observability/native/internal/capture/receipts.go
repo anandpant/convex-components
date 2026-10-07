@@ -73,16 +73,37 @@ func (o *Outbox) initReceipts() error {
 // of its pending payload commit together, or neither becomes visible on restart.
 // The events view reconstructs every original column, including nullable batch_id.
 func moveReceipts(tx *sql.Tx, predicate string, args ...any) error {
-	statements := []string{
-		"INSERT OR IGNORE INTO receipt_scopes(destination,instance,boot,request_id) SELECT DISTINCT destination,instance,boot,request_id FROM pending_events WHERE " + predicate,
-		"INSERT OR IGNORE INTO receipt_batches(batch_id) SELECT DISTINCT batch_id FROM pending_events WHERE batch_id IS NOT NULL AND (" + predicate + ")",
-		"INSERT INTO acknowledged_events(identity,digest,scope,sequence,kind,received_at,batch) SELECT e.identity,unhex(e.digest),s.id,e.sequence,e.kind,e.received_at,b.id FROM (SELECT * FROM pending_events WHERE " + predicate + ") e JOIN receipt_scopes s ON s.destination=e.destination AND s.instance=e.instance AND s.boot=e.boot AND s.request_id=e.request_id LEFT JOIN receipt_batches b ON b.batch_id=e.batch_id",
-		"DELETE FROM pending_events WHERE " + predicate,
+	if _, err := tx.Exec("CREATE TEMP TABLE IF NOT EXISTS receipt_move_keys(identity TEXT PRIMARY KEY) WITHOUT ROWID"); err != nil {
+		return err
 	}
-	for _, statement := range statements {
-		if _, err := tx.Exec(statement, args...); err != nil {
+	for {
+		if _, err := tx.Exec("DELETE FROM receipt_move_keys"); err != nil {
 			return err
 		}
+		// A bounded group fits the existing drain reserve even at the 4-MiB minimum.
+		// Source pages become reusable before the next group; one encompassing
+		// transaction still makes the complete migration/ACK atomic.
+		result, err := tx.Exec("INSERT INTO receipt_move_keys SELECT identity FROM pending_events WHERE "+predicate+" LIMIT 64", args...)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+		statements := []string{
+			"INSERT OR IGNORE INTO receipt_scopes(destination,instance,boot,request_id) SELECT DISTINCT destination,instance,boot,request_id FROM pending_events WHERE identity IN (SELECT identity FROM receipt_move_keys)",
+			"INSERT OR IGNORE INTO receipt_batches(batch_id) SELECT DISTINCT batch_id FROM pending_events WHERE batch_id IS NOT NULL AND identity IN (SELECT identity FROM receipt_move_keys)",
+			"INSERT INTO acknowledged_events(identity,digest,scope,sequence,kind,received_at,batch) SELECT e.identity,unhex(e.digest),s.id,e.sequence,e.kind,e.received_at,b.id FROM (SELECT * FROM pending_events WHERE identity IN (SELECT identity FROM receipt_move_keys)) e JOIN receipt_scopes s ON s.destination=e.destination AND s.instance=e.instance AND s.boot=e.boot AND s.request_id=e.request_id LEFT JOIN receipt_batches b ON b.batch_id=e.batch_id",
+			"DELETE FROM pending_events WHERE identity IN (SELECT identity FROM receipt_move_keys)",
+		}
+		for _, statement := range statements {
+			if _, err = tx.Exec(statement); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
 }

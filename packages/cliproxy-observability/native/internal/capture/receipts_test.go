@@ -272,3 +272,25 @@ func TestLegacyRestoreRetainsPostMigrationObservations(t *testing.T) {
 		t.Fatal("forward migration after rollback changed records")
 	}
 }
+
+func TestMigrationFitsExistingCeilingWithDistinctReceiptScopes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.db")
+	db := legacyReceiptDB(t, path, 6500)
+	if _, err := db.Exec("UPDATE events SET request_id=identity,batch_id=identity"); err != nil {
+		t.Fatal(err)
+	}
+	before := eventFingerprint(t, db)
+	db.Close()
+	o, err := OpenOutbox(path, 4<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	if after := eventFingerprint(t, o.db); after != before {
+		t.Fatal("bounded migration changed historical logical rows")
+	}
+	var integrity string
+	if err = o.db.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
+		t.Fatal("bounded migration corrupted ledger")
+	}
+}

@@ -101,8 +101,19 @@ func (d Destination) binding() string {
 	return Digest(b)
 }
 func (o *Outbox) initDelivery() error {
-	_, err := o.db.Exec(`CREATE TABLE IF NOT EXISTS health(destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,observed_at INTEGER NOT NULL,payload BLOB NOT NULL,delivered_digest TEXT NOT NULL,dirty INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(destination,instance,boot)); CREATE INDEX IF NOT EXISTS health_pending ON health(destination,instance,observed_at); CREATE TABLE IF NOT EXISTS delivery_bindings(destination TEXT PRIMARY KEY,binding TEXT NOT NULL); CREATE TABLE IF NOT EXISTS batches(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,path TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,first_sequence INTEGER NOT NULL,through_sequence INTEGER NOT NULL,bytes INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,last_status INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS segment_limits(destination TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,max_events INTEGER NOT NULL,PRIMARY KEY(destination,boot,request_id)); CREATE TABLE IF NOT EXISTS delivery_status(destination TEXT PRIMARY KEY,state TEXT NOT NULL,last_status INTEGER NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS batches_state ON batches(state); CREATE INDEX IF NOT EXISTS batches_pending ON batches(destination,state,next_attempt); CREATE INDEX IF NOT EXISTS events_pending ON events(destination,state,received_at); UPDATE batches SET state='pending' WHERE state='delivering'; UPDATE delivery_status SET state='unavailable',reason='destination_not_active_after_restart';`)
+	_, err := o.db.Exec(`CREATE TABLE IF NOT EXISTS health(destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,observed_at INTEGER NOT NULL,payload BLOB NOT NULL,delivered_digest TEXT NOT NULL,dirty INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(destination,instance,boot)); CREATE INDEX IF NOT EXISTS health_pending ON health(destination,instance,observed_at); CREATE TABLE IF NOT EXISTS delivery_bindings(destination TEXT PRIMARY KEY,binding TEXT NOT NULL); CREATE TABLE IF NOT EXISTS batches(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,path TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,first_sequence INTEGER NOT NULL,through_sequence INTEGER NOT NULL,bytes INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,last_status INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS segment_limits(destination TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,max_events INTEGER NOT NULL,PRIMARY KEY(destination,boot,request_id)); CREATE TABLE IF NOT EXISTS delivery_status(destination TEXT PRIMARY KEY,state TEXT NOT NULL,last_status INTEGER NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS batches_state ON batches(state); CREATE INDEX IF NOT EXISTS batches_pending ON batches(destination,state,next_attempt); UPDATE batches SET state='pending' WHERE state='delivering'; UPDATE delivery_status SET state='unavailable',reason='destination_not_active_after_restart';`)
 	if err != nil {
+		return err
+	}
+	var eventKind string
+	if err = o.db.QueryRow("SELECT type FROM sqlite_master WHERE name='events'").Scan(&eventKind); err != nil {
+		return err
+	}
+	table := "events"
+	if eventKind == "view" {
+		table = "pending_events"
+	}
+	if _, err = o.db.Exec("CREATE INDEX IF NOT EXISTS events_pending ON " + table + "(destination,state,received_at)"); err != nil {
 		return err
 	}
 	rows, err := o.db.Query("PRAGMA table_info(events)")
@@ -337,7 +348,7 @@ func (o *Outbox) nextBatch(d Destination) (*deliveryBatch, error) {
 	}
 	defer tx.Rollback()
 	var firstPayload []byte
-	err = tx.QueryRow("SELECT payload FROM events WHERE destination=? AND instance=? AND state='pending' AND batch_id IS NULL ORDER BY received_at,request_id,sequence LIMIT 1", d.ID, d.Instance).Scan(&firstPayload)
+	err = tx.QueryRow("SELECT payload FROM pending_events WHERE destination=? AND instance=? AND state='pending' AND batch_id IS NULL ORDER BY received_at,request_id,sequence LIMIT 1", d.ID, d.Instance).Scan(&firstPayload)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -350,7 +361,7 @@ func (o *Outbox) nextBatch(d Destination) (*deliveryBatch, error) {
 	}
 	limit := 256
 	_ = tx.QueryRow("SELECT max_events FROM segment_limits WHERE destination=? AND boot=? AND request_id=?", d.ID, first.Boot, first.RequestID).Scan(&limit)
-	rows, err := tx.Query("SELECT identity,payload,sequence FROM events WHERE destination=? AND instance=? AND boot=? AND request_id=? AND state='pending' AND batch_id IS NULL AND sequence>=? ORDER BY sequence LIMIT 256", d.ID, d.Instance, first.Boot, first.RequestID, first.Sequence)
+	rows, err := tx.Query("SELECT identity,payload,sequence FROM pending_events WHERE destination=? AND instance=? AND boot=? AND request_id=? AND state='pending' AND batch_id IS NULL AND sequence>=? ORDER BY sequence LIMIT 256", d.ID, d.Instance, first.Boot, first.RequestID, first.Sequence)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +407,7 @@ func (o *Outbox) nextBatch(d Destination) (*deliveryBatch, error) {
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err = tx.Exec("UPDATE events SET batch_id=? WHERE identity=?", b.Identity, id); err != nil {
+		if _, err = tx.Exec("UPDATE pending_events SET batch_id=? WHERE identity=?", b.Identity, id); err != nil {
 			return nil, err
 		}
 	}
@@ -484,7 +495,7 @@ func (o *Outbox) ackBatch(b deliveryBatch) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec("UPDATE events SET state='delivered',payload=x'' WHERE batch_id=?", b.Identity); err != nil {
+	if err = moveReceipts(tx, "batch_id=?", b.Identity); err != nil {
 		return err
 	}
 	if _, err = tx.Exec("UPDATE batches SET state='delivered',last_status=200 WHERE identity=?", b.Identity); err != nil {
@@ -587,7 +598,7 @@ func (o *Outbox) resegment(b deliveryBatch) error {
 	if _, err = tx.Exec("UPDATE batches SET state='superseded' WHERE identity=?", b.Identity); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("UPDATE events SET batch_id=NULL WHERE batch_id=?", b.Identity); err != nil {
+	if _, err = tx.Exec("UPDATE pending_events SET batch_id=NULL WHERE batch_id=?", b.Identity); err != nil {
 		return err
 	}
 	if _, err = tx.Exec("INSERT OR REPLACE INTO segment_limits(destination,boot,request_id,max_events) VALUES (?,?,?,?)", b.Destination, b.Boot, b.Request, max(1, int(b.Through-b.First+1)/2)); err != nil {

@@ -1,3 +1,4 @@
+import { validCapacity } from "./capture/capacity.js";
 import type {
   GenericActionCtx,
   GenericDataModel,
@@ -221,8 +222,10 @@ export async function handleCliproxyCaptureRequest(
         scopeConflictsTotal: candidate.scopeConflictsTotal,
         expiredScopesTotal: candidate.expiredScopesTotal,
         activeCalls: candidate.activeCalls,
+        ...(candidate.capacity === undefined ? {} : { capacity: candidate.capacity }),
       };
       if (
+        !validCapacity(candidate.capacity) ||
         typeof args.startedAt !== "string" ||
         typeof args.observedAt !== "string" ||
         !Number.isFinite(Date.parse(args.startedAt)) ||

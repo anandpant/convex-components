@@ -101,6 +101,54 @@ function healthRecord(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+it("persists optional capacity and keeps old health senders compatible", async () => {
+  const s = setup();
+  const capacity = {
+    budgetBytes: 2147483648,
+    allocatedBytes: 1000000000,
+    reusableBytes: 0,
+    remainingBytes: 1146435072,
+    pendingBytes: 913845,
+    acknowledgedEvents: 1623463,
+    observedAt: "2026-10-07T20:53:37Z",
+    growthBytesPerSecond: 150000,
+    estimatedSecondsToCeiling: 7642.90048,
+  };
+  const body = healthRecord({ capacity });
+  expect((await s.post(body)).status).toBe(200);
+  const row = await s.backend.query(api.queries.getBootHealth, {
+    destinationId: body.destinationId,
+    instanceId: body.instanceId,
+    pluginBootId: body.pluginBootId,
+  });
+  expect(JSON.parse(row!.healthJson).capacity).toEqual(capacity);
+  expect((await s.post(healthRecord())).status).toBe(200);
+});
+it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
+  "rejects invalid capacity before persistence: %s",
+  async (allocatedBytes) => {
+    const s = setup();
+    const mutation = vi.spyOn(s.ctx, "runMutation");
+    expect(
+      (
+        await s.post(
+          healthRecord({
+            capacity: {
+              budgetBytes: 2147483648,
+              allocatedBytes,
+              reusableBytes: 0,
+              remainingBytes: 0,
+              pendingBytes: 0,
+              acknowledgedEvents: 1,
+              observedAt: "2026-10-07T20:53:37Z",
+            },
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(mutation).not.toHaveBeenCalled();
+  },
+);
 it("keeps health persistence failures retryable and acknowledges an exact retry", async () => {
   const s = setup();
   const body = healthRecord();

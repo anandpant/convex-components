@@ -167,7 +167,7 @@ def nginx_command(*args):
 
 
 def events():
-    with sqlite3.connect(ROOT/'outbox/events.db') as db: return [json.loads(r[0]) for r in db.execute('select payload from events order by rowid')]
+    with sqlite3.connect(ROOT/'outbox/events.db') as db: return [json.loads(r[0]) for r in db.execute('select payload from events order by destination,instance,boot,request_id,sequence')]
 
 def wait_events(expected):
     for _ in range(100):

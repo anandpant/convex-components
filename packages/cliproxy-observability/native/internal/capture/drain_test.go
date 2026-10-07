@@ -159,7 +159,7 @@ func TestStartupCompactsSparseReceiptsAndBoundsTerminalHistory(t *testing.T) {
 		raw := drainEvent(uint64(i), 1800)
 		var event Observation
 		json.Unmarshal(raw, &event)
-		if _, err = tx.Exec("INSERT INTO events(identity,digest,destination,instance,boot,request_id,sequence,kind,payload,state) VALUES (?,?,?,?,?,?,?,?,?,'delivered')", event.Identity(), Digest(raw), "prod", "instance", "boot", "request", i, "stream_chunk", raw); err != nil {
+		if _, err = tx.Exec("INSERT INTO pending_events(identity,digest,destination,instance,boot,request_id,sequence,kind,payload,state) VALUES (?,?,?,?,?,?,?,?,?,'delivered')", event.Identity(), Digest(raw), "prod", "instance", "boot", "request", i, "stream_chunk", raw); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -169,7 +169,7 @@ func TestStartupCompactsSparseReceiptsAndBoundsTerminalHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err = tx.Exec("UPDATE events SET payload=x''"); err != nil {
+	if _, err = tx.Exec("UPDATE pending_events SET payload=x''"); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(); err != nil {
@@ -187,7 +187,7 @@ func TestStartupCompactsSparseReceiptsAndBoundsTerminalHistory(t *testing.T) {
 	}
 	identityRaw, _ := json.Marshal([]any{"prod", "instance", "boot", "request", 1001, 1001})
 	batchID := Digest(identityRaw)
-	if _, err = o.db.Exec("INSERT INTO batches(identity,digest,path,destination,instance,boot,request_id,first_sequence,through_sequence,bytes,state) VALUES (?,?,?,?,?,?,?,?,?,?,'quarantined'); UPDATE events SET batch_id=? WHERE state='pending'", batchID, Digest(content), segment, "prod", "instance", "boot", "request", 1001, 1001, len(content), batchID); err != nil {
+	if _, err = o.db.Exec("INSERT INTO batches(identity,digest,path,destination,instance,boot,request_id,first_sequence,through_sequence,bytes,state) VALUES (?,?,?,?,?,?,?,?,?,?,'quarantined'); UPDATE pending_events SET batch_id=? WHERE state='pending'", batchID, Digest(content), segment, "prod", "instance", "boot", "request", 1001, 1001, len(content), batchID); err != nil {
 		t.Fatal(err)
 	}
 	var before int

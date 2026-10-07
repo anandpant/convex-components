@@ -21,7 +21,29 @@ func main() {
 	budget := flag.Int64("budget-bytes", 2<<30, "outbox database ceiling")
 	reserve := flag.Uint64("reserve-bytes", 2<<30, "minimum filesystem free space")
 	delivery := flag.String("delivery-config", "", "private destination credential bundle; empty disables remote delivery")
+	restore := flag.Bool("restore-legacy-outbox", false, "restore current logical records for a prior exporter; exporter must be stopped")
 	flag.Parse()
+	if *restore {
+		if !filepath.IsAbs(*socket) {
+			fmt.Fprintln(os.Stderr, "absolute private socket required for restore ownership")
+			os.Exit(1)
+		}
+		lock, err := os.OpenFile(*socket+".lock", os.O_RDWR, 0600)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "restore socket lock unavailable")
+			os.Exit(1)
+		}
+		defer lock.Close()
+		if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+			fmt.Fprintln(os.Stderr, "capture exporter is still running")
+			os.Exit(1)
+		}
+		if err := capture.RestoreLegacyOutbox(*db, *budget, *reserve); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(*socket, *db, *budget, *reserve, *delivery); err != nil {
 		fmt.Fprintln(os.Stderr, "capture exporter stopped:", err)
 		os.Exit(1)

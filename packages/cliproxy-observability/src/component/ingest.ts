@@ -1,3 +1,4 @@
+import { capacityValidator, validCapacity } from "../capture/capacity.js";
 import { v } from "convex/values";
 import { mutation } from "./_generated/server.js";
 import { blobValue } from "./schema.js";
@@ -266,9 +267,11 @@ export const recordHealth = mutation({
     scopeConflictsTotal: v.number(),
     expiredScopesTotal: v.number(),
     activeCalls: v.number(),
+    capacity: v.optional(capacityValidator),
   },
   handler: async (ctx, args) => {
     bounded(JSON.stringify(args), 4096);
+    if (!validCapacity(args.capacity)) throw new Error("invalid capture capacity");
     const at = Date.parse(args.observedAt);
     if (!Number.isFinite(at) || !Number.isFinite(Date.parse(args.startedAt)))
       throw new Error("invalid health time");

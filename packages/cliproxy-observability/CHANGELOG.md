@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.3
+
+- Separate immutable acknowledged receipts from mutable pending payloads, retaining
+  every historical logical field and exact replay/conflict semantics. Migrate and
+  acknowledge atomically without dropping pending or retired destination data.
+- Index pending batch lookup so acknowledgement work does not scan the permanent
+  receipt ledger. Keep constant-time status counters and report measured capacity
+  and conditional exhaustion forecasts in status and optional boot health.
+- Preserve older health senders and receivers; new capacity fields are optional.
+  Native database migration needs qualification and an explicit activation window.
+
 ## 0.3.2
 
 - Return retryable HTTP 503 when a valid health record cannot be saved, instead of HTTP 400 that permanently quarantines the native exporter. Invalid health input is rejected before the backend write. Segment persistence failures continue to return 503.

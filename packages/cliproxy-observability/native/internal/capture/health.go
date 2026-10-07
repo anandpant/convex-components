@@ -11,20 +11,21 @@ import (
 )
 
 type Health struct {
-	SchemaVersion     int    `json:"schemaVersion"`
-	Operation         string `json:"operation"`
-	Destination       string `json:"destinationId"`
-	Instance          string `json:"instanceId"`
-	Boot              string `json:"pluginBootId"`
-	StartedAt         string `json:"startedAt"`
-	ObservedAt        string `json:"observedAt"`
-	Observations      uint64 `json:"observationsTotal"`
-	Dropped           uint64 `json:"droppedObservationsTotal"`
-	ControlLost       uint64 `json:"lostControlObservationsTotal"`
-	ScopeConflicts    uint64 `json:"scopeConflictsTotal"`
-	ExpiredScopes     uint64 `json:"expiredScopesTotal"`
-	Active            int    `json:"activeCalls"`
-	PrecommitCoverage string `json:"precommitCoverage"`
+	Capacity          *Capacity `json:"capacity,omitempty"`
+	SchemaVersion     int       `json:"schemaVersion"`
+	Operation         string    `json:"operation"`
+	Destination       string    `json:"destinationId"`
+	Instance          string    `json:"instanceId"`
+	Boot              string    `json:"pluginBootId"`
+	StartedAt         string    `json:"startedAt"`
+	ObservedAt        string    `json:"observedAt"`
+	Observations      uint64    `json:"observationsTotal"`
+	Dropped           uint64    `json:"droppedObservationsTotal"`
+	ControlLost       uint64    `json:"lostControlObservationsTotal"`
+	ScopeConflicts    uint64    `json:"scopeConflictsTotal"`
+	ExpiredScopes     uint64    `json:"expiredScopesTotal"`
+	Active            int       `json:"activeCalls"`
+	PrecommitCoverage string    `json:"precommitCoverage"`
 }
 
 func (e *Engine) healthLoop(ctx context.Context) {
@@ -48,13 +49,26 @@ func (e *Engine) healthLoop(ctx context.Context) {
 			}
 			active := len(e.scopes)
 			e.mu.Unlock()
+			var capacity *Capacity
+			statusReq, _ := http.NewRequestWithContext(ctx, "GET", "http://capture/status", nil)
+			if response, err := client.Do(statusReq); err == nil {
+				var status struct {
+					Capacity *Capacity `json:"capacity"`
+				}
+				if response.StatusCode == 200 {
+					_ = json.NewDecoder(io.LimitReader(response.Body, 16384)).Decode(&status)
+					capacity = status.Capacity
+				}
+				response.Body.Close()
+			}
 			seen := map[string]bool{}
 			for _, binding := range e.config.Bindings {
 				if seen[binding.Destination] {
 					continue
 				}
 				seen[binding.Destination] = true
-				h := Health{1, "health_record", binding.Destination, e.config.Instance, e.boot, e.started, now.UTC().Format(time.RFC3339Nano), e.observations.Load(), e.dropped.Load(), e.controlLost.Load(), e.conflicts.Load(), e.expired.Load(), active, "unknown_before_local_commit"}
+				h := Health{nil, 1, "health_record", binding.Destination, e.config.Instance, e.boot, e.started, now.UTC().Format(time.RFC3339Nano), e.observations.Load(), e.dropped.Load(), e.controlLost.Load(), e.conflicts.Load(), e.expired.Load(), active, "unknown_before_local_commit"}
+				h.Capacity = capacity
 				raw, _ := json.Marshal(h)
 				req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/health", bytes.NewReader(raw))
 				req.Header.Set("Content-Type", "application/json")

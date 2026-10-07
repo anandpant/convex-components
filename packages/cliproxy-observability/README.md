@@ -13,6 +13,37 @@ This package is a release candidate. Native delivery and receiver normalization 
 
 No deployed receiver or browser proof is claimed by these tests.
 
+## Native receipt storage and capacity
+
+Native 0.2.1 stores immutable ACK receipts separately from pending payloads. The
+`events` read view reconstructs every historical field, including exact identity,
+digest, scope, timestamp and batch ID. Pending payloads move to the receipt ledger
+only in the same durable transaction as an exact ACK. Startup migration and
+reopening preserve unacknowledged records, including retired destinations.
+
+`GET /status` reports current allocation, reusable pages, payload bytes, receipt
+count and admission headroom. Optional boot-health `capacity` carries the same
+information. Exhaustion estimates extrapolate measured net growth between samples;
+they disappear when there is no positive measured growth. They do not guarantee a
+failure time or bounded indefinite retention. Older health senders and receivers
+remain compatible.
+
+Stop the exporter before migration or rollback. Before using a candidate, qualify
+the exact binaries, logical-row preservation, disk reserve, replay/conflict rules,
+outage/restart paths and the isolated stock/nginx fixture. Keep rollback binaries.
+For rollback, use the candidate exporter with `--restore-legacy-outbox --socket
+/absolute/private/capture.sock --db /absolute/private/events.db` and the installed
+budget/reserve settings. It acquires the service's existing socket lock and
+transactionally restores **current** logical rows for the prior exporter; an old
+database snapshot would discard observations captured after migration. Restoration
+requires enough space within the unchanged database ceiling and filesystem reserve.
+Recheck complete fingerprints and integrity before starting the prior exporter.
+
+The 1.6-million-receipt benchmarks are explicit, offline measurements:
+`go test ./internal/capture -run '^$' -bench 'BenchmarkReceipt(Ledger|AcknowledgementBurst)1600000' -benchtime=1x`.
+They compare equal ingress queues and isolate acknowledgement selection; they do
+not prove lossless production capture or live provider acceptance.
+
 ## Host integration
 
 Mount `@shpitdev/convex-cliproxy-observability/convex.config` with `app.use`. Construct `CliproxyObservability(components.cliproxyObservability)` in the host backend. Expose a dedicated HTTP action through `handleCliproxyCaptureRequest`; use private receiver credentials, exact destination/instance enrollment and private blob storage. Never pass receiver credentials to inference sandboxes.

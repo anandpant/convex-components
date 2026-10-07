@@ -9,12 +9,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type Outbox struct {
+	capacityMu         sync.Mutex
+	capacityAt         time.Time
+	capacityBytes      int64
 	db                 *sql.DB
 	path               string
 	reserve            uint64
@@ -70,7 +75,11 @@ func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
 		}
 	}
 	o := &Outbox{db: db, path: path, reserve: reserve, budget: maxBytes}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,payload BLOB NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,state TEXT NOT NULL DEFAULT 'pending'); CREATE INDEX IF NOT EXISTS events_call ON events(destination,instance,boot,request_id,sequence);`)
+	var eventKind string
+	_ = db.QueryRow("SELECT type FROM sqlite_master WHERE name='events'").Scan(&eventKind)
+	if eventKind != "view" {
+		_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events(identity TEXT PRIMARY KEY,digest TEXT NOT NULL,destination TEXT NOT NULL,instance TEXT NOT NULL,boot TEXT NOT NULL,request_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,payload BLOB NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,state TEXT NOT NULL DEFAULT 'pending'); CREATE INDEX IF NOT EXISTS events_call ON events(destination,instance,boot,request_id,sequence);`)
+	}
 	if err == nil {
 		// SQLite's hard ceiling applies to delivery bookkeeping too. Keep bounded
 		// drain space outside the event-admission budget so a full legacy database
@@ -82,6 +91,9 @@ func OpenOutbox(path string, maxBytes int64, reserve uint64) (*Outbox, error) {
 	}
 	if err == nil {
 		err = o.compactAtAdmissionCeiling()
+	}
+	if err == nil {
+		err = o.initReceipts()
 	}
 	if err != nil {
 		db.Close()
@@ -118,12 +130,17 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == "GET" && r.URL.Path == "/status" {
 		var count, bytes int64
-		err := o.db.QueryRow("SELECT count(*),coalesce(sum(length(payload)),0) FROM events").Scan(&count, &bytes)
+		err := o.db.QueryRow("SELECT pending_rows+receipt_rows,payload_bytes FROM outbox_counts WHERE id=1").Scan(&count, &bytes)
 		if err != nil {
 			http.Error(w, "outbox unavailable", 503)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"delivery": o.deliveryStatus(), "durableEvents": count, "payloadBytes": bytes, "remoteDelivery": "durable_batches", "retention": "indefinite", "precommitCoverage": "unknown"})
+		capacity, err := o.capacity()
+		if err != nil {
+			http.Error(w, "capacity unavailable", 503)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"capacity": capacity, "delivery": o.deliveryStatus(), "durableEvents": count, "payloadBytes": bytes, "remoteDelivery": "durable_batches", "retention": "indefinite", "precommitCoverage": "unknown"})
 		return
 	}
 	if r.Method == "POST" && r.URL.Path == "/health" {
@@ -172,7 +189,7 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var existing string
-	err = tx.QueryRow("SELECT digest FROM events WHERE identity=?", identity).Scan(&existing)
+	err = tx.QueryRow("SELECT digest FROM pending_events WHERE identity=? UNION ALL SELECT lower(hex(digest)) FROM acknowledged_events WHERE identity=?", identity, identity).Scan(&existing)
 	if err == nil {
 		if existing != digest {
 			http.Error(w, "identity conflict", 409)
@@ -181,7 +198,7 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if err == sql.ErrNoRows {
 		if limit, ok := o.destinationBudgets[event.Destination]; ok && !(len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_")) {
 			var pending int64
-			if tx.QueryRow("SELECT coalesce(sum(length(payload)),0) FROM events WHERE destination=? AND state='pending'", event.Destination).Scan(&pending) != nil || pending+int64(len(raw)) > limit {
+			if tx.QueryRow("SELECT coalesce(sum(length(payload)),0) FROM pending_events WHERE destination=? AND state='pending'", event.Destination).Scan(&pending) != nil || pending+int64(len(raw)) > limit {
 				http.Error(w, "destination outbox budget", 507)
 				return
 			}
@@ -200,7 +217,7 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "disk reserve", 507)
 			return
 		}
-		_, err = tx.Exec("INSERT INTO events(identity,digest,destination,instance,boot,request_id,sequence,kind,payload) VALUES (?,?,?,?,?,?,?,?,?)", identity, digest, event.Destination, event.Instance, event.Boot, event.RequestID, event.Sequence, event.Kind, raw)
+		_, err = tx.Exec("INSERT INTO pending_events(identity,digest,destination,instance,boot,request_id,sequence,kind,payload) VALUES (?,?,?,?,?,?,?,?,?)", identity, digest, event.Destination, event.Instance, event.Boot, event.RequestID, event.Sequence, event.Kind, raw)
 		if err != nil {
 			http.Error(w, "outbox capacity or write failure", 507)
 			return

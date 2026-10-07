@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+
+- Return retryable HTTP 503 when a valid health record cannot be saved, instead of HTTP 400 that permanently quarantines the native exporter. Invalid health input is rejected before the backend write. Segment persistence failures continue to return 503.
+- Native plugin/exporter binaries, capture schema, credentials and queued records are unchanged. Updating the receiver package does not require a CLIProxy restart.
+
 ## 0.3.1
 
 - `fromOpenRouterSpan` adds a BYOK call's `byokInferenceUsageCost` to OpenRouter's charge, so `cost.total` is the call's inference cost instead of OpenRouter's fee alone. A BYOK span without that cost now has `cost.kind: "unknown"`. The structural `OpenRouterSpanInput` accepts `isByok` and `byokInferenceUsageCost`.

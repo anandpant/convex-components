@@ -204,11 +204,12 @@ export async function handleCliproxyCaptureRequest(
         candidate.schemaVersion !== 1 ||
         candidate.destinationId !== options.destinationId ||
         !options.instanceIds.includes(candidate.instanceId) ||
+        typeof candidate.pluginBootId !== "string" ||
         !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/.test(candidate.pluginBootId) ||
         candidate.precommitCoverage !== "unknown_before_local_commit"
       )
         return new Response("invalid health scope", { status: 403 });
-      const result = await ctx.runMutation(options.client.component.ingest.recordHealth, {
+      const args = {
         destinationId: options.destinationId,
         instanceId: candidate.instanceId,
         pluginBootId: candidate.pluginBootId,
@@ -220,13 +221,35 @@ export async function handleCliproxyCaptureRequest(
         scopeConflictsTotal: candidate.scopeConflictsTotal,
         expiredScopesTotal: candidate.expiredScopesTotal,
         activeCalls: candidate.activeCalls,
-      });
-      return Response.json({
-        ...result,
-        digest: await sha256(raw),
-        destinationId: options.destinationId,
-        deploymentId: options.deploymentId,
-      });
+      };
+      if (
+        typeof args.startedAt !== "string" ||
+        typeof args.observedAt !== "string" ||
+        !Number.isFinite(Date.parse(args.startedAt)) ||
+        !Number.isFinite(Date.parse(args.observedAt)) ||
+        ![
+          args.observationsTotal,
+          args.droppedObservationsTotal,
+          args.lostControlObservationsTotal,
+          args.scopeConflictsTotal,
+          args.expiredScopesTotal,
+          args.activeCalls,
+        ].every((value) => Number.isSafeInteger(value) && value >= 0) ||
+        new TextEncoder().encode(JSON.stringify(args)).byteLength > 4096
+      )
+        return new Response("invalid health record", { status: 400 });
+      // Backend failures must remain retryable; the exporter quarantines 4xx.
+      try {
+        const result = await ctx.runMutation(options.client.component.ingest.recordHealth, args);
+        return Response.json({
+          ...result,
+          digest: await sha256(raw),
+          destinationId: options.destinationId,
+          deploymentId: options.deploymentId,
+        });
+      } catch {
+        return new Response("capture temporarily unavailable", { status: 503 });
+      }
     }
     parsed = await validateSegment(raw, options);
   } catch (error) {

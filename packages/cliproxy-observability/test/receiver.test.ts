@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { readFileSync } from "node:fs";
 import { convexTest } from "convex-test";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import schema from "../src/component/schema.js";
 import { api } from "../src/component/_generated/api.js";
 import type { ComponentApi } from "../src/component/_generated/component.js";
@@ -80,6 +80,92 @@ function setup() {
     );
   return { backend, client, ctx, blobs, storage, options, post };
 }
+function healthRecord(overrides: Record<string, unknown> = {}) {
+  const first = events[0]!;
+  const time = new Date(Date.parse(first.observedAt) + 60000).toISOString();
+  return {
+    schemaVersion: 1,
+    operation: "health_record",
+    destinationId: first.destinationId,
+    instanceId: first.instanceId,
+    pluginBootId: "new-boot",
+    startedAt: time,
+    observedAt: time,
+    observationsTotal: 10,
+    droppedObservationsTotal: 3,
+    lostControlObservationsTotal: 1,
+    scopeConflictsTotal: 0,
+    expiredScopesTotal: 0,
+    activeCalls: 1,
+    precommitCoverage: "unknown_before_local_commit",
+    ...overrides,
+  };
+}
+it("keeps health persistence failures retryable and acknowledges an exact retry", async () => {
+  const s = setup();
+  const body = healthRecord();
+  const mutation = vi
+    .spyOn(s.ctx, "runMutation")
+    .mockRejectedValue(new Error("backend unavailable"));
+  expect((await s.post(body)).status).toBe(503);
+  expect(await s.backend.run((ctx) => ctx.db.query("bootHealth").collect())).toHaveLength(0);
+  mutation.mockRestore();
+  const retry = await s.post(body);
+  expect(retry.status).toBe(200);
+  expect(await retry.json()).toEqual({
+    committed: true,
+    digest: await sha256(encode.encode(JSON.stringify(body))),
+    destinationId: s.options.destinationId,
+    deploymentId: s.options.deploymentId,
+  });
+  expect(await s.backend.run((ctx) => ctx.db.query("bootHealth").collect())).toHaveLength(1);
+});
+it.each([
+  ["startedAt", null],
+  ["startedAt", "invalid"],
+  ["observedAt", 123],
+  ["observedAt", "invalid"],
+  ["observedAt", " ".repeat(4096) + "2026-10-07"],
+  ["observationsTotal", "10"],
+  ["observationsTotal", undefined],
+  ["observationsTotal", 0.5],
+  ["observationsTotal", Number.MAX_SAFE_INTEGER + 1],
+  ...[
+    "observationsTotal",
+    "droppedObservationsTotal",
+    "lostControlObservationsTotal",
+    "scopeConflictsTotal",
+    "expiredScopesTotal",
+    "activeCalls",
+  ].map((field) => [field, -1]),
+])("rejects invalid health %s=%s before persistence", async (field, value) => {
+  const s = setup();
+  const mutation = vi.spyOn(s.ctx, "runMutation");
+  expect((await s.post(healthRecord({ [field as string]: value }))).status).toBe(400);
+  expect(mutation).not.toHaveBeenCalled();
+});
+it.each([
+  ["destinationId", "other-destination"],
+  ["instanceId", "other-instance"],
+  ["pluginBootId", 123],
+])("rejects invalid health scope %s before persistence", async (field, value) => {
+  const s = setup();
+  const mutation = vi.spyOn(s.ctx, "runMutation");
+  expect((await s.post(healthRecord({ [field as string]: value }))).status).toBe(403);
+  expect(mutation).not.toHaveBeenCalled();
+});
+it("keeps segment persistence failures retryable", async () => {
+  const s = setup();
+  const body = await envelope();
+  const mutation = vi
+    .spyOn(s.ctx, "runMutation")
+    .mockRejectedValue(new Error("backend unavailable"));
+  expect((await s.post(body)).status).toBe(503);
+  expect(await s.backend.run((ctx) => ctx.db.query("receipts").collect())).toHaveLength(0);
+  mutation.mockRestore();
+  expect((await s.post(body)).status).toBe(200);
+  expect(await s.backend.run((ctx) => ctx.db.query("receipts").collect())).toHaveLength(1);
+});
 it.each([
   ["unauthenticated", { "content-type": "application/json" }, 401],
   ["wrong content type", { ...headers, "content-type": "text/plain" }, 415],
@@ -450,23 +536,7 @@ it("authenticates content-free health and retains boot loss counters without reg
   expect(await handshake.json()).toMatchObject({ ready: true, deploymentId: "dev-deployment" });
   expect(s.blobs.size).toBe(0);
   await s.post(await envelope(events.slice(0, 2)));
-  const time = new Date(Date.parse(first.observedAt) + 60000).toISOString();
-  const health = {
-    schemaVersion: 1,
-    operation: "health_record",
-    destinationId: first.destinationId,
-    instanceId: first.instanceId,
-    pluginBootId: "new-boot",
-    startedAt: time,
-    observedAt: time,
-    observationsTotal: 10,
-    droppedObservationsTotal: 3,
-    lostControlObservationsTotal: 1,
-    scopeConflictsTotal: 0,
-    expiredScopesTotal: 0,
-    activeCalls: 1,
-    precommitCoverage: "unknown_before_local_commit",
-  };
+  const health = healthRecord();
   expect((await s.post(health)).status).toBe(200);
   await s.post(await envelope(events.slice(2, 3)));
   const coverage = await s.backend.query(api.queries.getCaptureCoverage, {

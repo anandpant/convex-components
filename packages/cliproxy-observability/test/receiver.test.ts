@@ -137,11 +137,11 @@ it.each([
     "scopeConflictsTotal",
     "expiredScopesTotal",
     "activeCalls",
-  ].map((field) => [field, -1]),
-])("rejects invalid health %s=%s before persistence", async (field, value) => {
+  ].map((field) => [field, -1] as const),
+] as const)("rejects invalid health %s=%s before persistence", async (field, value) => {
   const s = setup();
   const mutation = vi.spyOn(s.ctx, "runMutation");
-  expect((await s.post(healthRecord({ [field as string]: value }))).status).toBe(400);
+  expect((await s.post(healthRecord({ [field]: value }))).status).toBe(400);
   expect(mutation).not.toHaveBeenCalled();
 });
 it.each([

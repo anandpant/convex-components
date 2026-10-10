@@ -7,8 +7,8 @@ with `captureIncomplete: true` and no provider outcome. The first two were
 captured through official stock 8.0.23 with simulated provider playback on CT101;
 the last came through the same plugin's C ABI against a private temporary outbox.
 These are synthetic content, separate from the real provider recordings below.
-Plugin SHA-256: `30c2010d466bb4c0f7ae6a996ea7832f68c6e50563a15d24d3c9af429440433e`.
-Exporter SHA-256: `7f2fe118a9c190b0cd22a0737e3f37d00e66e6f758aa6a41d13368996aa0d8c4`.
+Plugin SHA-256: `592168393cfcfad9df599bfc40a0d9889f9035aa4455f491b45d917394e2663a`.
+Exporter SHA-256: `a5b3d4017cd52cd52819149665535cd165de7498ec702176d151ca106ee28321`.
 Keep the raw lines and Base64 bodies intact; the package test validates their
 digests and reconstructs both protocols through the shared splitter.
 

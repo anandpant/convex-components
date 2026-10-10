@@ -9,6 +9,7 @@ import (
 
 const streamBlockBytes = 64 << 10
 const streamBlockFrames = 1024
+const contentRecordLimit = 256
 const scopeMetadataCharge = 8192
 const recordMetadataCharge = 16 << 10
 const controlRecordCharge = recordMetadataCharge + 24
@@ -106,7 +107,9 @@ func (e *Engine) enqueueObservation(s *scopeState, o Observation, ownedCharge in
 	charge := observationCharge(o)
 	delta := charge - ownedCharge
 	accepted := e.tryCapacity(func() bool {
-		if pipe.items.Load() >= int64(cap(pipe.queue)) {
+		// Count queued and worker-held records globally. An idle enrolled
+		// destination must not strand half of the unchanged 256-record pool.
+		if e.queuedItems.Load() >= contentRecordLimit {
 			return false
 		}
 		if delta > 0 && !e.reserveBytes(pipe, delta, false) {
@@ -116,6 +119,7 @@ func (e *Engine) enqueueObservation(s *scopeState, o Observation, ownedCharge in
 			e.releaseBytes(pipe, -delta)
 		}
 		pipe.items.Add(1)
+		e.queuedItems.Add(1)
 		pipe.queue <- queued{o: o, size: charge}
 		recordPeak(&e.admission.queuePeak, pipe.items.Load())
 		return true
@@ -301,6 +305,7 @@ func (e *Engine) closeContent() {
 				e.content.lost.Add(uint64(len(q.o.Body) + len(q.o.Error)))
 				e.releaseBytes(pipe, q.size)
 				pipe.items.Add(-1)
+				e.queuedItems.Add(-1)
 			}
 			for len(pipe.control) > 0 {
 				q := <-pipe.control

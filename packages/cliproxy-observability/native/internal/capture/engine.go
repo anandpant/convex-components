@@ -57,6 +57,7 @@ type capturePipe struct {
 	budget       int
 }
 type Engine struct {
+	queuedItems  atomic.Int64
 	content      contentCounters
 	closing      bool
 	flushDone    chan struct{}
@@ -90,7 +91,7 @@ func NewEngine(c Config) *Engine {
 	e := &Engine{config: c, boot: BootID(), scopes: map[string]*scopeState{}, pipes: map[string]*capturePipe{}, started: time.Now().UTC().Format(time.RFC3339Nano), healthDone: make(chan struct{}), flushDone: make(chan struct{}), cancel: cancel, done: make(chan struct{})}
 	var workers sync.WaitGroup
 	for destination := range destinations {
-		pipe := &capturePipe{queue: make(chan queued, max(1, 256/count)), control: make(chan queued, max(1, min(128, c.QueueBytes/8/controlRecordCharge)/count)), budget: c.QueueBytes / count}
+		pipe := &capturePipe{queue: make(chan queued, contentRecordLimit), control: make(chan queued, max(1, min(128, c.QueueBytes/8/controlRecordCharge)/count)), budget: c.QueueBytes / count}
 		e.pipes[destination] = pipe
 		workers.Add(2)
 		go func() { defer workers.Done(); e.worker(ctx, pipe) }()
@@ -308,6 +309,7 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 				e.dropped.Add(1)
 				e.releaseBytes(pipe, q.size)
 				pipe.items.Add(-1)
+				e.queuedItems.Add(-1)
 
 				e.content.lost.Add(uint64(len(o.Body) + len(o.Error)))
 
@@ -337,6 +339,7 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 					e.content.unconfirmed.Add(uint64(len(o.Body) + len(o.Error)))
 					e.releaseBytes(pipe, q.size)
 					pipe.items.Add(-1)
+					e.queuedItems.Add(-1)
 
 					return
 				case <-time.After(250 * time.Millisecond):
@@ -345,6 +348,7 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 			e.content.committed.Add(uint64(len(o.Body) + len(o.Error)))
 			e.releaseBytes(pipe, q.size)
 			pipe.items.Add(-1)
+			e.queuedItems.Add(-1)
 
 		}
 	}

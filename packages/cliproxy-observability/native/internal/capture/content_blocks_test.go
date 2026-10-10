@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func contentTestEngine(t *testing.T, budget int, handler func(Observation)) *Engine {
+func contentTestEngine(t *testing.T, budget int, handler func(Observation), bindings ...Binding) *Engine {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "capture-block-")
 	if err != nil {
@@ -23,6 +23,7 @@ func contentTestEngine(t *testing.T, budget int, handler func(Observation)) *Eng
 	c := testConfig()
 	c.Socket = filepath.Join(dir, "capture.sock")
 	c.QueueBytes = budget
+	c.Bindings = append(c.Bindings, bindings...)
 	listener, err := net.Listen("unix", c.Socket)
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +74,72 @@ func waitContent(t *testing.T, e *Engine) {
 	}
 	if e.bytes.Load() != 0 {
 		t.Fatal("content did not reach durable ACK", e.Status())
+	}
+}
+
+func TestContentRecordPoolSharesIdleDestinationCapacityAndKeepsGlobalBound(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan string, 2)
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(gate) }) }
+	defer unblock()
+	e := contentTestEngine(t, 64<<20, func(o Observation) {
+		if o.Kind == "request" {
+			entered <- o.Destination
+			<-gate
+		}
+	}, Binding{Key: "test-Prod-key-123456789", Destination: "prod", Deployment: "https://prod.convex.site", Environment: "prod"})
+	emit := func(method, id, destination string) {
+		h := testHeaders()
+		if destination == "prod" {
+			h.Set("Authorization", "Bearer test-Prod-key-123456789")
+			h.Set("X-Meshix-Capture-Destination", "prod")
+			h.Set("X-Meshix-Deployment", "https://prod.convex.site")
+		}
+		raw, err := json.Marshal(Hook{RequestID: id, Headers: h, Outcome: "succeeded"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.Observe(method, raw)
+	}
+	emit("request.intercept_before", "busy", "dev")
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first writer did not reach held ACK")
+	}
+	for i := 1; i < 200; i++ {
+		emit("response.intercept_after", "busy", "dev")
+	}
+	if got := e.content.snapshot(e.bytes.Load()).CapacityRejections; got != 0 {
+		t.Fatal("idle destination stranded available record slots", got)
+	}
+	emit("request.intercept_before", "other", "prod")
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second destination did not reach its own writer")
+	}
+	for i := 1; i < 56; i++ {
+		emit("response.intercept_after", "other", "prod")
+	}
+	if e.content.snapshot(e.bytes.Load()).CapacityRejections != 0 {
+		t.Fatal("rejected a record within the 256 global slots")
+	}
+	emit("response.intercept_after", "other", "prod")
+	if e.content.snapshot(e.bytes.Load()).CapacityRejections != 1 {
+		t.Fatal("global bound did not include both held records")
+	}
+	unblock()
+	deadline := time.Now().Add(3 * time.Second)
+	for e.queuedItems.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	emit("request.complete", "busy", "dev")
+	emit("request.complete", "other", "prod")
+	waitContent(t, e)
+	if e.queuedItems.Load() != 0 {
+		t.Fatal("record reservations survived durable ACK")
 	}
 }
 

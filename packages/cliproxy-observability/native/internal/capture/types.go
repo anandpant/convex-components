@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const Version = "0.2.1"
+const Version = "0.2.2"
 const CapturePolicy = "hook-body-v1"
 const MaxBody = 1 << 20
 const MaxFrame = 2 << 20

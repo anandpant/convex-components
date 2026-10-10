@@ -198,7 +198,7 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if err == sql.ErrNoRows {
 		if limit, ok := o.destinationBudgets[event.Destination]; ok && !(len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_")) {
 			var pending int64
-			if tx.QueryRow("SELECT coalesce(sum(length(payload)),0) FROM pending_events WHERE destination=? AND state='pending'", event.Destination).Scan(&pending) != nil || pending+int64(len(raw)) > limit {
+			if tx.QueryRow("SELECT coalesce((SELECT payload_bytes FROM destination_counts WHERE destination=?),0)", event.Destination).Scan(&pending) != nil || pending+int64(len(raw)) > limit {
 				http.Error(w, "destination outbox budget", 507)
 				return
 			}

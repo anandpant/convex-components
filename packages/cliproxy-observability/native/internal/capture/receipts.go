@@ -66,6 +66,9 @@ func (o *Outbox) initReceipts() error {
  `); err != nil {
 		return err
 	}
+	if err := initDestinationCounts(tx); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

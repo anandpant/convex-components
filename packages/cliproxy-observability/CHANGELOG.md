@@ -2,6 +2,10 @@
 
 ## 0.3.5
 
+- Index pending, unassigned records in delivery order. First-ready selection no
+  longer sorts every same-second payload while holding the admission connection.
+  The additive index keeps all logical records and remains on binary rollback.
+
 - Native 0.2.3 groups already queued observations into bounded Unix-socket
   admissions (at most 512 records and the existing 2 MiB frame). SQLite commits
   the group with FULL durability before returning each exact identity/digest.

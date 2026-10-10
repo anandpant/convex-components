@@ -24,6 +24,10 @@ const MaxSegment = 1408 << 10
 
 const terminalBatchHistory = 1024
 
+// Match events_ready's predicate and order; sorting same-second payloads holds
+// the sole SQLite connection and can starve capture admission during a burst.
+const firstReadyEventQuery = "SELECT payload FROM pending_events WHERE destination=? AND instance=? AND state='pending' AND batch_id IS NULL ORDER BY received_at,request_id,sequence LIMIT 1"
+
 // Event identity/digest receipts are retained independently of delivery history.
 // Never trim a batch that can still be retried or acknowledged.
 func trimTerminalBatches(db interface {
@@ -348,7 +352,7 @@ func (o *Outbox) nextBatch(d Destination) (*deliveryBatch, error) {
 	}
 	defer tx.Rollback()
 	var firstPayload []byte
-	err = tx.QueryRow("SELECT payload FROM pending_events WHERE destination=? AND instance=? AND state='pending' AND batch_id IS NULL ORDER BY received_at,request_id,sequence LIMIT 1", d.ID, d.Instance).Scan(&firstPayload)
+	err = tx.QueryRow(firstReadyEventQuery, d.ID, d.Instance).Scan(&firstPayload)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

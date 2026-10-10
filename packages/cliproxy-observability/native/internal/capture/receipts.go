@@ -53,6 +53,7 @@ func (o *Outbox) initReceipts() error {
  CREATE INDEX IF NOT EXISTS events_call ON pending_events(destination,instance,boot,request_id,sequence);
  CREATE INDEX IF NOT EXISTS events_pending ON pending_events(destination,state,received_at);
  CREATE INDEX IF NOT EXISTS events_batch ON pending_events(batch_id);
+ CREATE INDEX IF NOT EXISTS events_ready ON pending_events(destination,instance,received_at,request_id,sequence) WHERE state='pending' AND batch_id IS NULL;
  CREATE VIEW IF NOT EXISTS events AS
  SELECT identity,digest,destination,instance,boot,request_id,sequence,kind,payload,received_at,state,batch_id FROM pending_events
  UNION ALL

@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { expandStockHookBlock, projectCapturedPayloads } from "../src/protocols/index.js";
 import { applyObservation, type ProjectionCheckpoint } from "../src/protocols/checkpoint.js";
 import { initialCall } from "../src/client.js";
@@ -50,6 +51,43 @@ const validate = (o: CaptureObservationV1) =>
     destinationId: "dev",
     instanceIds: ["test"],
   });
+
+it("accepts exact native producer fixtures and reconstructs both stock protocols", async () => {
+  const lines = readFileSync(
+    new URL("../fixtures/content-block-v1.ndjson", import.meta.url),
+    "utf8",
+  )
+    .trim()
+    .split("\n");
+  expect(lines).toHaveLength(3);
+  for (const [index, line] of lines.entries()) {
+    const o = JSON.parse(line) as CaptureObservationV1;
+    const validated = await validateObservation(encoder.encode(line), {
+      destinationId: o.destinationId,
+      instanceIds: [o.instanceId],
+    });
+    if (index < 2) {
+      const chunks = expandStockHookBlock(validated.body, o.stockHookChunkLengths!);
+      const projected = projectCapturedPayloads({
+        route: o.route,
+        chunks,
+        stockHookChunks: true,
+        complete: true,
+      });
+      expect(projected.responseState).toBe("decoded");
+      expect(JSON.stringify(projected.output)).toContain("CAPTURE_OK");
+    } else {
+      expect(o).toMatchObject({
+        kind: "completion",
+        captureIncomplete: true,
+        gap: "capture_shutdown_incomplete",
+        contentBytes: 0,
+      });
+      expect(o.completionOutcome).toBeUndefined();
+      expect(o.lostContentBytes).toBeUndefined();
+    }
+  }
+});
 
 it("recovers exact binary bytes and empty parser boundaries without mutating them", () => {
   const bytes = new Uint8Array([0xff, 0, 0xc3, 0xa9, 0x80]);

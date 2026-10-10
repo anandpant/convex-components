@@ -6,6 +6,8 @@
 - Accept both historical observations and `hook-content-block-v1`; retain exact diagnostics up to the supported 1 MiB content bound and persisted local byte-health counters.
 - Native 0.2.4 charges partial, queued and worker-held content against one byte budget (64 MiB default). Capacity admission never waits on a writer; exhaustion records exact known loss while preserving later bytes. Timer, size, lifecycle and shutdown flushes keep capture completeness separate from provider outcome and remote delivery.
 - Deploy the compatible receiver and consuming readers before activating the new native producer. No database schema or retention changes.
+- Reader fixtures are in `fixtures/content-block-v1.ndjson`: exact producer Chat and Responses blocks plus an incomplete shutdown completion with unknown provider outcome. Recover callback boundaries through `/protocols`' `expandStockHookBlock`; treat gaps, positive `lostContentBytes`, or `captureIncomplete` as incomplete argument assembly.
+- CT101's final-binary burst qualification preserved all 4,566,810 observed bytes and eight terminals at approximately 30,000 callbacks/s with zero loss, incompleteness or capacity rejections at both 64 MiB and 16 MiB. Preserve its existing explicit 16 MiB setting: measured charged peak was 3,860,256 bytes, leaving over fourfold headroom. The package default remains 64 MiB; these are offline qualification results, and live acceptance remains a separate gate.
 
 ## 0.3.5
 

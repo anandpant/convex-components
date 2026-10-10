@@ -1,5 +1,25 @@
 # Protocol recordings
 
+`content-block-v1.ndjson` contains three exact native 0.2.4 producer observations
+for consuming-reader tests: a Chat block containing three bare JSON callbacks, a
+Responses block containing ten event/data callbacks, and a shutdown completion
+with `captureIncomplete: true` and no provider outcome. The first two were
+captured through official stock 8.0.23 with simulated provider playback on CT101;
+the last came through the same plugin's C ABI against a private temporary outbox.
+These are synthetic content, separate from the real provider recordings below.
+Plugin SHA-256: `30c2010d466bb4c0f7ae6a996ea7832f68c6e50563a15d24d3c9af429440433e`.
+Exporter SHA-256: `7f2fe118a9c190b0cd22a0737e3f37d00e66e6f758aa6a41d13368996aa0d8c4`.
+Keep the raw lines and Base64 bodies intact; the package test validates their
+digests and reconstructs both protocols through the shared splitter.
+
+Lengths count bytes, including empty callbacks. On known capacity loss the
+producer emits a metadata-only `stock_hook_block` gap with lengths `[0]`,
+`captureIncomplete: true`, and cumulative `lostContentBytes`; later content is
+preserved with `gap: "prior_capture_gap"`. Shutdown can be incomplete with zero
+known lost bytes, so the omitted `lostContentBytes` in the third line means zero
+known byte loss, not complete capture. Never assemble complete tool arguments
+across a gap. `completionOutcome` describes the provider only when observed.
+
 `real/` contains plugin-produced, sanitized observations from six harmless dev protocol variants and one real cancellation on September 23, 2026 UTC. The isolated official CLIProxy 7.3.5
 ARM64 process used the existing private Meshix dev gateway as its configured
 OpenAI-compatible upstream. The existing gateway retained ownership of OAuth

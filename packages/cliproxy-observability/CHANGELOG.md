@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.5
+
+- Native 0.2.3 groups already queued observations into bounded Unix-socket
+  admissions (at most 128 records and the existing 2 MiB frame). SQLite commits
+  the group with FULL durability before returning each exact identity/digest.
+  A failed group rolls back; an unknown ACK retries the same serialized records.
+- Preserve separate control admission, queue and disk budgets, capture/receiver
+  schemas and indefinite retention. Report Unix request count separately from
+  record attempts/ACKs; round-trip latency is weighted by records in a group.
+  This does not change remote delivery batching or establish campaign coverage.
+
+## 0.3.4
+
+- Native 0.2.2 maintains destination pending-byte totals with transaction triggers
+  instead of scanning each backlog on every admission. Recount on startup and
+  reject counter/trigger mismatches without discarding or correcting records.
+- Persist private local admission counters, failures, latency and queue peaks.
+  Receiver 0.3.3 accepts that optional health field without projecting it.
+
 ## 0.3.3
 
 - Separate immutable acknowledged receipts from mutable pending payloads, retaining

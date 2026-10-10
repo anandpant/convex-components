@@ -104,7 +104,7 @@ func TestDestinationBudgetBacklogBurst(t *testing.T) {
 		start := time.Now()
 		rec := httptest.NewRecorder()
 		o.ServeHTTP(rec, r)
-		if r.URL.Path == "/events" {
+		if r.URL.Path == "/events" || r.URL.Path == "/events/batch" {
 			latencyMu.Lock()
 			latencies = append(latencies, time.Since(start))
 			latencyMu.Unlock()

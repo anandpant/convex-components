@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -167,68 +166,9 @@ func (o *Outbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]bool{"resumed": true})
 		return
 	}
-	if r.Method != "POST" || r.URL.Path != "/events" {
+	if r.Method != "POST" || (r.URL.Path != "/events" && r.URL.Path != "/events/batch") {
 		http.NotFound(w, r)
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, MaxFrame+1))
-	if err != nil || len(raw) > MaxFrame {
-		http.Error(w, "envelope limit", 413)
-		return
-	}
-	var event Observation
-	if json.Unmarshal(raw, &event) != nil || event.Validate() != nil {
-		http.Error(w, "invalid event", 400)
-		return
-	}
-	identity, digest := event.Identity(), Digest(raw)
-	tx, err := o.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		http.Error(w, "outbox unavailable", 503)
-		return
-	}
-	defer tx.Rollback()
-	var existing string
-	err = tx.QueryRow("SELECT digest FROM pending_events WHERE identity=? UNION ALL SELECT lower(hex(digest)) FROM acknowledged_events WHERE identity=?", identity, identity).Scan(&existing)
-	if err == nil {
-		if existing != digest {
-			http.Error(w, "identity conflict", 409)
-			return
-		}
-	} else if err == sql.ErrNoRows {
-		if limit, ok := o.destinationBudgets[event.Destination]; ok && !(len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_")) {
-			var pending int64
-			if tx.QueryRow("SELECT coalesce((SELECT payload_bytes FROM destination_counts WHERE destination=?),0)", event.Destination).Scan(&pending) != nil || pending+int64(len(raw)) > limit {
-				http.Error(w, "destination outbox budget", 507)
-				return
-			}
-		}
-		var pages, freePages int64
-		admissionBudget := o.budget - min(o.budget/8, 1<<20)
-		if len(event.Body) == 0 && strings.HasPrefix(event.Gap, "capture_queue_") {
-			admissionBudget = o.budget // Control gaps cannot consume drain bookkeeping space.
-		}
-		if tx.QueryRow("PRAGMA page_count").Scan(&pages) != nil || tx.QueryRow("PRAGMA freelist_count").Scan(&freePages) != nil || (pages-freePages)*4096+int64(len(raw)*2) > admissionBudget {
-			http.Error(w, "reserved control capacity", 507)
-			return
-		}
-		var stat syscall.Statfs_t
-		if syscall.Statfs(filepath.Dir(o.path), &stat) != nil || uint64(stat.Bavail)*uint64(stat.Bsize) < o.reserve+uint64(len(raw)*4) {
-			http.Error(w, "disk reserve", 507)
-			return
-		}
-		_, err = tx.Exec("INSERT INTO pending_events(identity,digest,destination,instance,boot,request_id,sequence,kind,payload) VALUES (?,?,?,?,?,?,?,?,?)", identity, digest, event.Destination, event.Instance, event.Boot, event.RequestID, event.Sequence, event.Kind, raw)
-		if err != nil {
-			http.Error(w, "outbox capacity or write failure", 507)
-			return
-		}
-	} else {
-		http.Error(w, "outbox unavailable", 503)
-		return
-	}
-	if tx.Commit() != nil {
-		http.Error(w, "outbox commit failure", 503)
-		return
-	}
-	json.NewEncoder(w).Encode(map[string]string{"identity": identity, "digest": digest})
+	o.admitEvents(w, r, r.URL.Path == "/events/batch")
 }

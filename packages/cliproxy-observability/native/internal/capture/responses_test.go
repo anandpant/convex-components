@@ -31,7 +31,7 @@ func captureHookBodies(t *testing.T, request, afterAuth string, callbacks []stri
 		t.Fatal(err)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/events" {
+		if r.URL.Path != "/events" && r.URL.Path != "/events/batch" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -43,13 +43,26 @@ func captureHookBodies(t *testing.T, request, afterAuth string, callbacks []stri
 		if bytes.Contains(raw, []byte("cookie-transport-only")) || bytes.Contains(raw, []byte("opaque-auth-secret")) {
 			t.Error("transport credential metadata persisted")
 		}
-		var o Observation
-		if err := json.Unmarshal(raw, &o); err != nil {
-			t.Error(err)
+		records := []json.RawMessage{raw}
+		if r.URL.Path == "/events/batch" && json.Unmarshal(raw, &records) != nil {
+			t.Error("invalid batch")
 			return
 		}
-		delivered <- o
-		json.NewEncoder(w).Encode(map[string]string{"identity": o.Identity(), "digest": Digest(raw)})
+		acks := make([]eventACK, 0, len(records))
+		for _, record := range records {
+			var o Observation
+			if err := json.Unmarshal(record, &o); err != nil {
+				t.Error(err)
+				return
+			}
+			delivered <- o
+			acks = append(acks, eventACK{o.Identity(), Digest(record)})
+		}
+		if r.URL.Path == "/events/batch" {
+			json.NewEncoder(w).Encode(acks)
+		} else {
+			json.NewEncoder(w).Encode(acks[0])
+		}
 	})}
 	defer server.Close()
 	go server.Serve(listener)

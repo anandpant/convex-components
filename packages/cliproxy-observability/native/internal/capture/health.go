@@ -149,42 +149,5 @@ func (o *Outbox) sendHealth(ctx context.Context, d Destination, client *http.Cli
 }
 
 func (e *Engine) controlWorker(ctx context.Context, pipe *capturePipe) {
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", e.config.Socket)
-	}, MaxConnsPerHost: 1}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case q := <-pipe.control:
-			o := q.o
-			o.DroppedObservations = e.dropped.Load()
-			o.ScopeConflicts = e.conflicts.Load()
-			raw, _ := json.Marshal(o)
-			for {
-				start := time.Now()
-				req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/events", bytes.NewReader(raw))
-				req.Header.Set("Content-Type", "application/json")
-				res, err := client.Do(req)
-				status := 0
-				accepted := false
-				if err == nil {
-					status = res.StatusCode
-					body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
-					res.Body.Close()
-					var ack struct{ Identity, Digest string }
-					accepted = res.StatusCode == 200 && json.Unmarshal(body, &ack) == nil && ack.Identity == o.Identity() && ack.Digest == Digest(raw)
-				}
-				e.admission.record(start, status, accepted)
-				if accepted {
-					break
-				}
-				if !pause(ctx, 250*time.Millisecond) {
-					return
-				}
-			}
-		}
-	}
+	e.admissionWorker(ctx, pipe, pipe.control, true)
 }

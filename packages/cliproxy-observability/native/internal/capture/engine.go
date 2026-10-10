@@ -1,12 +1,9 @@
 package capture
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"maps"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -263,57 +260,7 @@ func (e *Engine) Observe(method string, raw []byte) {
 	}
 }
 func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", e.config.Socket)
-	}, MaxConnsPerHost: 1}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case q := <-pipe.queue:
-			o := q.o
-			o.DroppedObservations = e.dropped.Load()
-			o.ScopeConflicts = e.conflicts.Load()
-			o.ContentBytes = len(o.Body)
-			o.ContentSHA256 = Digest(o.Body)
-			raw, err := json.Marshal(o)
-			if err != nil || len(raw) > MaxFrame {
-				e.dropped.Add(1)
-				e.bytes.Add(-int64(q.size))
-				pipe.bytes.Add(-int64(q.size))
-				continue
-			}
-			// Retain the same serialized identity until a durable ACK. No inference goroutine waits here.
-			for {
-				start := time.Now()
-				req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/events", bytes.NewReader(raw))
-				req.Header.Set("Content-Type", "application/json")
-				res, err := client.Do(req)
-				status := 0
-				accepted := false
-				if err == nil {
-					status = res.StatusCode
-					var ack struct{ Identity, Digest string }
-					body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
-					res.Body.Close()
-					accepted = res.StatusCode == 200 && json.Unmarshal(body, &ack) == nil && ack.Identity == o.Identity() && ack.Digest == Digest(raw)
-				}
-				e.admission.record(start, status, accepted)
-				if accepted {
-					break
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(250 * time.Millisecond):
-				}
-			}
-			e.bytes.Add(-int64(q.size))
-			pipe.bytes.Add(-int64(q.size))
-		}
-	}
+	e.admissionWorker(ctx, pipe, pipe.queue, false)
 }
 func (e *Engine) RecordGap() { e.dropped.Add(1) }
 

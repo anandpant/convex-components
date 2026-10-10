@@ -1,8 +1,8 @@
 package capture
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -45,25 +45,46 @@ func (o *Outbox) admitEvents(w http.ResponseWriter, r *http.Request, batch bool)
 		return
 	}
 	defer tx.Rollback()
-	lookup, err := tx.Prepare("SELECT digest FROM pending_events WHERE identity=? UNION ALL SELECT lower(hex(digest)) FROM acknowledged_events WHERE identity=?")
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(acks)), ",")
+	keys := make([]any, 0, len(acks)*2)
+	for repeat := 0; repeat < 2; repeat++ {
+		for _, ack := range acks {
+			keys = append(keys, ack.Identity)
+		}
+	}
+	rows, err := tx.Query("SELECT identity,digest FROM pending_events WHERE identity IN ("+marks+") UNION ALL SELECT identity,lower(hex(digest)) FROM acknowledged_events WHERE identity IN ("+marks+")", keys...)
 	if err != nil {
 		http.Error(w, "outbox unavailable", 503)
 		return
 	}
-	defer lookup.Close()
+	existingRecords := make(map[string]string, len(acks))
+	for rows.Next() {
+		var id, digest string
+		if err = rows.Scan(&id, &digest); err != nil {
+			break
+		}
+		if prior, exists := existingRecords[id]; exists && prior != digest {
+			err = errors.New("conflicting durable identity")
+			break
+		}
+		existingRecords[id] = digest
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		http.Error(w, "outbox unavailable", 503)
+		return
+	}
 	newRecords := make([]int, 0, len(records))
 	seen := make(map[string]string, len(records))
-	var bytes, chargedBytes int64
+	var bytes int64
 	controlsOnly := true
 	for i, ack := range acks {
 		existing, duplicate := seen[ack.Identity]
 		if !duplicate {
-			err = lookup.QueryRow(ack.Identity, ack.Identity).Scan(&existing)
-			duplicate = err == nil
-			if err != nil && err != sql.ErrNoRows {
-				http.Error(w, "outbox unavailable", 503)
-				return
-			}
+			existing, duplicate = existingRecords[ack.Identity]
 		}
 		if duplicate {
 			if existing != ack.Digest {
@@ -76,12 +97,11 @@ func (o *Outbox) admitEvents(w http.ResponseWriter, r *http.Request, batch bool)
 		newRecords = append(newRecords, i)
 		bytes += int64(len(records[i]))
 		if !(len(events[i].Body) == 0 && strings.HasPrefix(events[i].Gap, "capture_queue_")) {
-			chargedBytes += int64(len(records[i]))
 			controlsOnly = false
 		}
 	}
 	if len(newRecords) > 0 {
-		if limit, ok := o.destinationBudgets[events[0].Destination]; ok && chargedBytes > 0 {
+		if limit, ok := o.destinationBudgets[events[0].Destination]; ok && !controlsOnly {
 			var pending int64
 			if tx.QueryRow("SELECT coalesce((SELECT payload_bytes FROM destination_counts WHERE destination=?),0)", events[0].Destination).Scan(&pending) != nil || pending+bytes > limit {
 				http.Error(w, "destination outbox budget", 507)
@@ -102,18 +122,15 @@ func (o *Outbox) admitEvents(w http.ResponseWriter, r *http.Request, batch bool)
 			http.Error(w, "disk reserve", 507)
 			return
 		}
-		insert, err := tx.Prepare("INSERT INTO pending_events(identity,digest,destination,instance,boot,request_id,sequence,kind,payload) VALUES (?,?,?,?,?,?,?,?,?)")
-		if err != nil {
-			http.Error(w, "outbox unavailable", 503)
-			return
-		}
-		defer insert.Close()
+		values := strings.TrimSuffix(strings.Repeat("(?,?,?,?,?,?,?,?,?),", len(newRecords)), ",")
+		args := make([]any, 0, len(newRecords)*9)
 		for _, i := range newRecords {
 			e := events[i]
-			if _, err = insert.Exec(acks[i].Identity, acks[i].Digest, e.Destination, e.Instance, e.Boot, e.RequestID, e.Sequence, e.Kind, records[i]); err != nil {
-				http.Error(w, "outbox capacity or write failure", 507)
-				return
-			}
+			args = append(args, acks[i].Identity, acks[i].Digest, e.Destination, e.Instance, e.Boot, e.RequestID, e.Sequence, e.Kind, records[i])
+		}
+		if _, err = tx.Exec("INSERT INTO pending_events(identity,digest,destination,instance,boot,request_id,sequence,kind,payload) VALUES "+values, args...); err != nil {
+			http.Error(w, "outbox capacity or write failure", 507)
+			return
 		}
 	}
 	if tx.Commit() != nil {

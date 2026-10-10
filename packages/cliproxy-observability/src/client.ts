@@ -1,3 +1,4 @@
+import { validContentHealth } from "./capture/content-health.js";
 import { validCapacity } from "./capture/capacity.js";
 import type {
   GenericActionCtx,
@@ -223,9 +224,11 @@ export async function handleCliproxyCaptureRequest(
         expiredScopesTotal: candidate.expiredScopesTotal,
         activeCalls: candidate.activeCalls,
         ...(candidate.capacity === undefined ? {} : { capacity: candidate.capacity }),
+        ...(candidate.content === undefined ? {} : { content: candidate.content }),
       };
       if (
         !validCapacity(candidate.capacity) ||
+        !validContentHealth(candidate.content) ||
         typeof args.startedAt !== "string" ||
         typeof args.observedAt !== "string" ||
         !Number.isFinite(Date.parse(args.startedAt)) ||

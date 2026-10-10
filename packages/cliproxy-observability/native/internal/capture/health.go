@@ -11,6 +11,7 @@ import (
 )
 
 type Health struct {
+	Content           *ContentHealth  `json:"content,omitempty"`
 	LocalAdmission    *LocalAdmission `json:"localAdmission,omitempty"`
 	Capacity          *Capacity       `json:"capacity,omitempty"`
 	SchemaVersion     int             `json:"schemaVersion"`
@@ -29,13 +30,48 @@ type Health struct {
 	PrecommitCoverage string          `json:"precommitCoverage"`
 }
 
+func healthClient(socketPath string) (*http.Client, *http.Transport) {
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", socketPath)
+	}, MaxConnsPerHost: 1}
+	return &http.Client{Transport: transport, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport
+}
+
+func (e *Engine) publishHealth(ctx context.Context, client *http.Client, now time.Time, active int) {
+	var capacity *Capacity
+	statusReq, _ := http.NewRequestWithContext(ctx, "GET", "http://capture/status", nil)
+	if response, err := client.Do(statusReq); err == nil {
+		var status struct {
+			Capacity *Capacity `json:"capacity"`
+		}
+		if response.StatusCode == 200 {
+			_ = json.NewDecoder(io.LimitReader(response.Body, 16384)).Decode(&status)
+			capacity = status.Capacity
+		}
+		response.Body.Close()
+	}
+	seen := map[string]bool{}
+	for _, binding := range e.config.Bindings {
+		if seen[binding.Destination] {
+			continue
+		}
+		seen[binding.Destination] = true
+		h := Health{Content: e.content.snapshot(e.bytes.Load()), LocalAdmission: e.admission.snapshot(), SchemaVersion: 1, Operation: "health_record", Destination: binding.Destination, Instance: e.config.Instance, Boot: e.boot, StartedAt: e.started, ObservedAt: now.UTC().Format(time.RFC3339Nano), Observations: e.observations.Load(), Dropped: e.dropped.Load(), ControlLost: e.controlLost.Load(), ScopeConflicts: e.conflicts.Load(), ExpiredScopes: e.expired.Load(), Active: active, PrecommitCoverage: "unknown_before_local_commit"}
+		h.Capacity = capacity
+		raw, _ := json.Marshal(h)
+		req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/health", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		res, err := client.Do(req)
+		if err == nil {
+			io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
+			res.Body.Close()
+		}
+	}
+}
 func (e *Engine) healthLoop(ctx context.Context) {
 	defer close(e.healthDone)
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", e.config.Socket)
-	}, MaxConnsPerHost: 1}
+	client, transport := healthClient(e.config.Socket)
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -44,41 +80,14 @@ func (e *Engine) healthLoop(ctx context.Context) {
 			e.mu.Lock()
 			for id, scope := range e.scopes {
 				if now.Sub(scope.last) > 24*time.Hour {
+					e.finishIncomplete(scope, id, now, "scope_expired")
 					delete(e.scopes, id)
 					e.expired.Add(1)
 				}
 			}
 			active := len(e.scopes)
 			e.mu.Unlock()
-			var capacity *Capacity
-			statusReq, _ := http.NewRequestWithContext(ctx, "GET", "http://capture/status", nil)
-			if response, err := client.Do(statusReq); err == nil {
-				var status struct {
-					Capacity *Capacity `json:"capacity"`
-				}
-				if response.StatusCode == 200 {
-					_ = json.NewDecoder(io.LimitReader(response.Body, 16384)).Decode(&status)
-					capacity = status.Capacity
-				}
-				response.Body.Close()
-			}
-			seen := map[string]bool{}
-			for _, binding := range e.config.Bindings {
-				if seen[binding.Destination] {
-					continue
-				}
-				seen[binding.Destination] = true
-				h := Health{LocalAdmission: e.admission.snapshot(), SchemaVersion: 1, Operation: "health_record", Destination: binding.Destination, Instance: e.config.Instance, Boot: e.boot, StartedAt: e.started, ObservedAt: now.UTC().Format(time.RFC3339Nano), Observations: e.observations.Load(), Dropped: e.dropped.Load(), ControlLost: e.controlLost.Load(), ScopeConflicts: e.conflicts.Load(), ExpiredScopes: e.expired.Load(), Active: active, PrecommitCoverage: "unknown_before_local_commit"}
-				h.Capacity = capacity
-				raw, _ := json.Marshal(h)
-				req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/health", bytes.NewReader(raw))
-				req.Header.Set("Content-Type", "application/json")
-				res, err := client.Do(req)
-				if err == nil {
-					io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
-					res.Body.Close()
-				}
-			}
+			e.publishHealth(ctx, client, now, active)
 		}
 		select {
 		case <-ctx.Done():
@@ -182,9 +191,14 @@ func (e *Engine) controlWorker(ctx context.Context, pipe *capturePipe) {
 					break
 				}
 				if !pause(ctx, 250*time.Millisecond) {
+					e.releaseBytes(pipe, q.size)
+					pipe.controlItems.Add(-1)
+					e.controlLost.Add(1)
 					return
 				}
 			}
+			e.releaseBytes(pipe, q.size)
+			pipe.controlItems.Add(-1)
 		}
 	}
 }

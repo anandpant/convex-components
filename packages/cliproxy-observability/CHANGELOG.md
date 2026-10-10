@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.6
+
+- Preserve streamed content in bounded, byte-identical stock hook blocks rather than one durable record per callback. The shared `expandStockHookBlock` helper restores parser boundaries for receiver projection and selected-call readers.
+- Accept both historical observations and `hook-content-block-v1`; retain exact diagnostics up to the supported 1 MiB content bound and persisted local byte-health counters.
+- Native 0.2.4 charges partial, queued and worker-held content against one byte budget (64 MiB default). Capacity admission never waits on a writer; exhaustion records exact known loss while preserving later bytes. Timer, size, lifecycle and shutdown flushes keep capture completeness separate from provider outcome and remote delivery.
+- Deploy the compatible receiver and consuming readers before activating the new native producer. No database schema or retention changes.
+- Share the unchanged 256 data-record slots globally, including records held by workers, so an idle enrolled destination does not strand slots while another loses content. Destination byte allowances and the separate control reserve stay bounded.
+- Source-repository reader fixtures are in `fixtures/content-block-v1.ndjson`: exact producer Chat and Responses blocks plus an incomplete shutdown completion with unknown provider outcome. Recover callback boundaries through `/protocols`' `expandStockHookBlock`; treat gaps, positive `lostContentBytes`, or `captureIncomplete` as incomplete argument assembly.
+- CT101's final-binary burst qualification preserved all 4,566,810 observed bytes and eight terminals at approximately 30,000 callbacks/s with zero loss, incompleteness or capacity rejections at both 64 MiB and 16 MiB. Preserve its existing explicit 16 MiB setting: measured charged peak was 3,561,920, leaving over fourfold headroom. The package default remains 64 MiB; these are offline qualification results, and live acceptance remains a separate gate.
+
 ## 0.3.5
 
 - Native 0.2.3 pins go-sqlite3 1.14.52 with SQLite 3.53.4, which includes

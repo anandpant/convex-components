@@ -1,3 +1,4 @@
+import { expandStockHookBlock } from "../protocols/stock-block.js";
 import type { ExactCorrelation } from "../model-call/index.js";
 export const MAX_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_CONTENT_BYTES = 1024 * 1024;
@@ -14,7 +15,7 @@ export type CaptureObservationV1 = {
   pluginVersion: string;
   /** Historical redacted observations retain their original policy label. */
   redactionVersion?: string;
-  capturePolicy?: "hook-body-v1";
+  capturePolicy?: "hook-body-v1" | "hook-content-block-v1";
   destinationId: string;
   instanceId: string;
   pluginBootId: string;
@@ -45,7 +46,11 @@ export type CaptureObservationV1 = {
   stockChunkIndex?: number;
   body?: string;
   observedBodyBytes?: number;
-  bodyFraming?: "stock_json_chunk" | "stock_sse_candidate" | "stock_hook_chunk";
+  bodyFraming?:
+    "stock_json_chunk" | "stock_sse_candidate" | "stock_hook_chunk" | "stock_hook_block";
+  stockHookChunkLengths?: number[];
+  lostContentBytes?: number;
+  captureIncomplete?: boolean;
   contentSha256: string;
   contentBytes: number;
   completionOutcome?: string;
@@ -135,6 +140,9 @@ export async function validateObservation(
     "correlation",
     "correlationConflicts",
     "stockChunkIndex",
+    "stockHookChunkLengths",
+    "lostContentBytes",
+    "captureIncomplete",
     "body",
     "observedBodyBytes",
     "bodyFraming",
@@ -234,11 +242,17 @@ export async function validateObservation(
     if (o[field] !== undefined && (typeof o[field] !== "string" || o[field]!.length > 256))
       throw new Error("invalid optional metadata");
   }
-  if (!o.pluginVersion || (!o.redactionVersion && o.capturePolicy !== "hook-body-v1"))
+  if (
+    !o.pluginVersion ||
+    (!o.redactionVersion &&
+      o.capturePolicy !== "hook-body-v1" &&
+      o.capturePolicy !== "hook-content-block-v1")
+  )
     throw new Error("capture versions required");
   if (
     o.capturePolicy !== undefined &&
-    (o.capturePolicy !== "hook-body-v1" || o.redactionVersion !== undefined)
+    (!["hook-body-v1", "hook-content-block-v1"].includes(o.capturePolicy) ||
+      o.redactionVersion !== undefined)
   )
     throw new Error("invalid capture policy");
   if (
@@ -248,11 +262,17 @@ export async function validateObservation(
       o.metadataOmissions.some((x) => typeof x !== "string" || x.length > 64))
   )
     throw new Error("invalid metadata omissions");
-  if (o.error !== undefined && (typeof o.error !== "string" || o.error.length > 4096))
+  if (
+    o.error !== undefined &&
+    (typeof o.error !== "string" ||
+      new TextEncoder().encode(o.error).length >
+        (o.capturePolicy === "hook-content-block-v1" ? MAX_CONTENT_BYTES : 4096))
+  )
     throw new Error("invalid error detail");
   if (
     (o.kind === "request_after_auth" || o.bodyFraming === "stock_hook_chunk") &&
-    o.capturePolicy !== "hook-body-v1"
+    o.capturePolicy !== "hook-body-v1" &&
+    o.capturePolicy !== "hook-content-block-v1"
   )
     throw new Error("raw hook policy required");
   if (
@@ -263,14 +283,51 @@ export async function validateObservation(
     throw new Error("raw hook provenance required");
   if (
     o.kind === "completion" &&
-    !["succeeded", "failed", "canceled", "rejected"].includes(o.completionOutcome ?? "")
+    !["succeeded", "failed", "canceled", "rejected"].includes(o.completionOutcome ?? "") &&
+    !(
+      o.capturePolicy === "hook-content-block-v1" &&
+      o.captureIncomplete === true &&
+      o.completionOutcome === undefined &&
+      ["capture_shutdown_incomplete", "scope_expired"].includes(o.gap ?? "")
+    )
   )
     throw new Error("invalid completion outcome");
   if (
     o.bodyFraming !== undefined &&
-    !["stock_json_chunk", "stock_sse_candidate", "stock_hook_chunk"].includes(o.bodyFraming)
+    !["stock_json_chunk", "stock_sse_candidate", "stock_hook_chunk", "stock_hook_block"].includes(
+      o.bodyFraming,
+    )
   )
     throw new Error("invalid body framing");
+  const body = decodeBody(o);
+  if (o.bodyFraming === "stock_hook_block") {
+    if (o.capturePolicy !== "hook-content-block-v1" || o.kind !== "stream_chunk")
+      throw new Error("stock block policy required");
+    expandStockHookBlock(body, o.stockHookChunkLengths ?? []);
+  } else if (o.stockHookChunkLengths !== undefined) {
+    throw new Error("unexpected stock block lengths");
+  }
+  if (
+    o.capturePolicy === "hook-content-block-v1" &&
+    (o.bodyFromSequence !== undefined ||
+      (o.kind === "stream_chunk" && o.bodyFraming !== "stock_hook_block"))
+  )
+    throw new Error("content block provenance required");
+  if (
+    o.lostContentBytes !== undefined &&
+    (o.capturePolicy !== "hook-content-block-v1" ||
+      !Number.isSafeInteger(o.lostContentBytes) ||
+      o.lostContentBytes < 0 ||
+      (o.lostContentBytes > 0 && o.captureIncomplete !== true))
+  )
+    throw new Error("invalid content loss count");
+  if (
+    o.captureIncomplete !== undefined &&
+    (o.capturePolicy !== "hook-content-block-v1" ||
+      typeof o.captureIncomplete !== "boolean" ||
+      (o.captureIncomplete && !o.gap))
+  )
+    throw new Error("invalid incomplete capture");
   if (
     o.observedBodyBytes !== undefined &&
     (!Number.isSafeInteger(o.observedBodyBytes) ||
@@ -287,7 +344,6 @@ export async function validateObservation(
       o.observedErrorBytes > MAX_ENVELOPE_BYTES)
   )
     throw new Error("invalid observed diagnostic size");
-  const body = decodeBody(o);
   if ((await sha256(body)) !== o.contentSha256) throw new Error("content digest mismatch");
   return {
     observation: o,

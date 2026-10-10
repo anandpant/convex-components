@@ -13,8 +13,8 @@ import (
 	"strings"
 )
 
-const Version = "0.2.3"
-const CapturePolicy = "hook-body-v1"
+const Version = "0.2.4"
+const CapturePolicy = "hook-content-block-v1"
 const MaxBody = 1 << 20
 const MaxFrame = 2 << 20
 
@@ -60,12 +60,12 @@ func (c *Config) Validate() error {
 		return errors.New("invalid capture identity/socket")
 	}
 	if c.QueueBytes == 0 {
-		c.QueueBytes = 16 << 20
+		c.QueueBytes = 64 << 20
 	}
 	if c.MaxActive == 0 {
 		c.MaxActive = 1024
 	}
-	if c.QueueBytes < MaxFrame || c.QueueBytes > 64<<20 || c.MaxActive < 1 || c.MaxActive > 4096 {
+	if c.QueueBytes < 2<<20 || c.QueueBytes > 64<<20 || c.MaxActive < 1 || c.MaxActive > 4096 {
 		return errors.New("invalid capture bounds")
 	}
 	if len(c.Bindings) > 8 {
@@ -166,45 +166,48 @@ func BootID() string {
 func Digest(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
 
 type Observation struct {
-	DroppedObservations  uint64            `json:"droppedObservationsTotal"`
-	ScopeConflicts       uint64            `json:"scopeConflictsTotal"`
-	SchemaVersion        int               `json:"schemaVersion"`
-	PluginVersion        string            `json:"pluginVersion"`
-	CapturePolicy        string            `json:"capturePolicy"`
-	Destination          string            `json:"destinationId"`
-	Instance             string            `json:"instanceId"`
-	Boot                 string            `json:"pluginBootId"`
-	RequestID            string            `json:"requestId"`
-	Sequence             uint64            `json:"sequence"`
-	Kind                 string            `json:"kind"`
-	ObservedAt           string            `json:"observedAt"`
-	OffsetNS             int64             `json:"offsetNs"`
-	Route                string            `json:"route"`
-	Revision             string            `json:"configRevision"`
-	SourceFormat         string            `json:"sourceFormat,omitempty"`
-	SelectedAuthID       string            `json:"selectedAuthId,omitempty"`
-	SelectedAuthIndex    string            `json:"selectedAuthIndex,omitempty"`
-	ExecutionModel       string            `json:"executionModel,omitempty"`
-	ExecutionProtocol    string            `json:"executionProtocol,omitempty"`
-	MetadataOmissions    []string          `json:"metadataOmissions,omitempty"`
-	Model                string            `json:"requestedModel,omitempty"`
-	TraceID              string            `json:"sourceTraceId,omitempty"`
-	Correlation          map[string]string `json:"correlation,omitempty"`
-	CorrelationConflicts []string          `json:"correlationConflicts,omitempty"`
-	ChunkIndex           *int              `json:"stockChunkIndex,omitempty"`
-	ObservedBodyBytes    int               `json:"observedBodyBytes,omitempty"`
-	BodyFraming          string            `json:"bodyFraming,omitempty"`
-	Body                 []byte            `json:"body,omitempty"`
-	ContentSHA256        string            `json:"contentSha256"`
-	ContentBytes         int               `json:"contentBytes"`
-	Outcome              string            `json:"completionOutcome,omitempty"`
-	StatusCode           int               `json:"executionStatusCode,omitempty"`
-	StartedAt            string            `json:"executionStartedAt,omitempty"`
-	CompletedAt          string            `json:"executionCompletedAt,omitempty"`
-	Error                string            `json:"error,omitempty"`
-	ObservedErrorBytes   int               `json:"observedErrorBytes,omitempty"`
-	ErrorPresent         bool              `json:"errorPresent,omitempty"`
-	Gap                  string            `json:"gap,omitempty"`
+	DroppedObservations   uint64            `json:"droppedObservationsTotal"`
+	ScopeConflicts        uint64            `json:"scopeConflictsTotal"`
+	SchemaVersion         int               `json:"schemaVersion"`
+	PluginVersion         string            `json:"pluginVersion"`
+	CapturePolicy         string            `json:"capturePolicy"`
+	Destination           string            `json:"destinationId"`
+	Instance              string            `json:"instanceId"`
+	Boot                  string            `json:"pluginBootId"`
+	RequestID             string            `json:"requestId"`
+	Sequence              uint64            `json:"sequence"`
+	Kind                  string            `json:"kind"`
+	ObservedAt            string            `json:"observedAt"`
+	OffsetNS              int64             `json:"offsetNs"`
+	Route                 string            `json:"route"`
+	Revision              string            `json:"configRevision"`
+	SourceFormat          string            `json:"sourceFormat,omitempty"`
+	SelectedAuthID        string            `json:"selectedAuthId,omitempty"`
+	SelectedAuthIndex     string            `json:"selectedAuthIndex,omitempty"`
+	ExecutionModel        string            `json:"executionModel,omitempty"`
+	ExecutionProtocol     string            `json:"executionProtocol,omitempty"`
+	MetadataOmissions     []string          `json:"metadataOmissions,omitempty"`
+	Model                 string            `json:"requestedModel,omitempty"`
+	TraceID               string            `json:"sourceTraceId,omitempty"`
+	Correlation           map[string]string `json:"correlation,omitempty"`
+	CorrelationConflicts  []string          `json:"correlationConflicts,omitempty"`
+	ChunkIndex            *int              `json:"stockChunkIndex,omitempty"`
+	ObservedBodyBytes     int               `json:"observedBodyBytes,omitempty"`
+	StockHookChunkLengths []int             `json:"stockHookChunkLengths,omitempty"`
+	LostContentBytes      uint64            `json:"lostContentBytes,omitempty"`
+	CaptureIncomplete     bool              `json:"captureIncomplete,omitempty"`
+	BodyFraming           string            `json:"bodyFraming,omitempty"`
+	Body                  []byte            `json:"body,omitempty"`
+	ContentSHA256         string            `json:"contentSha256"`
+	ContentBytes          int               `json:"contentBytes"`
+	Outcome               string            `json:"completionOutcome,omitempty"`
+	StatusCode            int               `json:"executionStatusCode,omitempty"`
+	StartedAt             string            `json:"executionStartedAt,omitempty"`
+	CompletedAt           string            `json:"executionCompletedAt,omitempty"`
+	Error                 string            `json:"error,omitempty"`
+	ObservedErrorBytes    int               `json:"observedErrorBytes,omitempty"`
+	ErrorPresent          bool              `json:"errorPresent,omitempty"`
+	Gap                   string            `json:"gap,omitempty"`
 }
 
 func (o Observation) Identity() string {
@@ -214,6 +217,32 @@ func (o Observation) Identity() string {
 func (o Observation) Validate() error {
 	if o.SchemaVersion != 1 || !identifier.MatchString(o.Destination) || !identifier.MatchString(o.Instance) || !identifier.MatchString(o.Boot) || !identifier.MatchString(o.RequestID) || o.Sequence == 0 || !AllowedRoute(o.Route) || len(o.Body) > MaxBody || o.ContentBytes != len(o.Body) || o.ContentSHA256 != Digest(o.Body) {
 		return errors.New("invalid observation")
+	}
+	if o.CapturePolicy == CapturePolicy && o.Kind == "stream_chunk" && o.BodyFraming != "stock_hook_block" {
+		return errors.New("content block provenance required")
+	}
+	if o.LostContentBytes > 0 && (!o.CaptureIncomplete || o.CapturePolicy != CapturePolicy) {
+		return errors.New("invalid content loss count")
+	}
+	if o.BodyFraming == "stock_hook_block" {
+		if o.CapturePolicy != CapturePolicy || o.Kind != "stream_chunk" || len(o.StockHookChunkLengths) == 0 || len(o.StockHookChunkLengths) > 1024 {
+			return errors.New("invalid stock content block")
+		}
+		total := 0
+		for _, n := range o.StockHookChunkLengths {
+			if n < 0 || n > len(o.Body)-total {
+				return errors.New("invalid stock block lengths")
+			}
+			total += n
+		}
+		if total != len(o.Body) {
+			return errors.New("stock block byte mismatch")
+		}
+	} else if len(o.StockHookChunkLengths) > 0 {
+		return errors.New("unexpected stock block lengths")
+	}
+	if o.CaptureIncomplete && o.Gap == "" {
+		return errors.New("incomplete capture without gap")
 	}
 	return nil
 }

@@ -1,5 +1,7 @@
 """Isolated stock binary proof. All provider payloads here are SIMULATED, never real recordings."""
 import concurrent.futures
+from contextlib import closing
+from collections import Counter
 import hashlib
 import http.client
 import json
@@ -174,6 +176,17 @@ def wait_events(expected):
         found=events()
         if sum(e['kind']=='completion' for e in found)>=expected:return found
         time.sleep(.05)
+    # Preserve bounded evidence on a failing CI run; --rm otherwise removes it.
+    # This private fixture contains only simulated provider content.
+    with closing(sqlite3.connect(ROOT/'outbox/events.db')) as db:
+        health = [json.loads(row[0]) for row in db.execute('SELECT payload FROM health')]
+    diagnostics = {
+        'expectedCompletions': expected,
+        'observationsByKind': dict(Counter(e['kind'] for e in found)),
+        'gaps': dict(Counter(e['gap'] for e in found if e.get('gap'))),
+        'health': health,
+    }
+    print('capture wait failure: '+json.dumps(diagnostics), flush=True)
     raise AssertionError(f'expected {expected} completed captures; got {len(found)} observations')
 
 def peak_rss(pids, stop, samples):

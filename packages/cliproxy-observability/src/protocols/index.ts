@@ -25,7 +25,7 @@ export function projectCapturedPayloads(args: {
   response?: Uint8Array;
   chunks?: readonly Uint8Array[];
   complete?: boolean;
-  /** Set only for capturePolicy hook-body-v1, never historical canonical SSE. */
+  /** Set only for expanded raw stock hooks, never historical canonical SSE. */
   stockHookChunks?: boolean;
 }): CliproxyProjection {
   const projection: CliproxyProjection = {
@@ -142,3 +142,5 @@ export function projectCapturedPayloads(args: {
   }
   return projection;
 }
+
+export { expandStockHookBlock } from "./stock-block.js";

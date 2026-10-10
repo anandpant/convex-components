@@ -39,6 +39,14 @@ func TestReservedGapAndBootHealthRecoverAfterOutage(t *testing.T) {
 		raw, _ := json.Marshal(h)
 		e.Observe("request.intercept_before", raw)
 	}
+	// Exercise the finite control reserve on an already enrolled call. New-call
+	// scope admission is itself byte bounded and cannot fill this reserve.
+	for i := 0; i < 70; i++ {
+		h := Hook{RequestID: "call-0", Body: large, ChunkIndex: i}
+		raw, _ := json.Marshal(h)
+		e.Observe("response.intercept_stream_chunk", raw)
+	}
+
 	if e.bytes.Load() > int64(c.QueueBytes) || e.dropped.Load() == 0 || e.controlLost.Load() == 0 {
 		t.Fatal("queue/reserved control limits not exercised")
 	}
@@ -61,7 +69,7 @@ func TestReservedGapAndBootHealthRecoverAfterOutage(t *testing.T) {
 		var raw []byte
 		outbox.db.QueryRow("SELECT payload FROM health LIMIT 1").Scan(&raw)
 		json.Unmarshal(raw, &persistedHealth)
-		outbox.db.QueryRow("SELECT count(*) FROM events WHERE CAST(payload AS TEXT) LIKE '%capture_queue_%'").Scan(&gaps)
+		outbox.db.QueryRow("SELECT count(*) FROM events WHERE CAST(payload AS TEXT) LIKE '%capture_content_capacity%'").Scan(&gaps)
 		if persistedHealth.ControlLost > 0 && gaps > 0 {
 			break
 		}

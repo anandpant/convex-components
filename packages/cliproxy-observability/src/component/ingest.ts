@@ -1,3 +1,4 @@
+import { contentHealthValidator, validContentHealth } from "../capture/content-health.js";
 import { capacityValidator, validCapacity } from "../capture/capacity.js";
 import { v } from "convex/values";
 import { mutation } from "./_generated/server.js";
@@ -268,10 +269,12 @@ export const recordHealth = mutation({
     expiredScopesTotal: v.number(),
     activeCalls: v.number(),
     capacity: v.optional(capacityValidator),
+    content: v.optional(contentHealthValidator),
   },
   handler: async (ctx, args) => {
     bounded(JSON.stringify(args), 4096);
     if (!validCapacity(args.capacity)) throw new Error("invalid capture capacity");
+    if (!validContentHealth(args.content)) throw new Error("invalid content health");
     const at = Date.parse(args.observedAt);
     if (!Number.isFinite(at) || !Number.isFinite(Date.parse(args.startedAt)))
       throw new Error("invalid health time");

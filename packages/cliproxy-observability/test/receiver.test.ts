@@ -278,94 +278,103 @@ it("commits raw independently, deduplicates exact retries, and projects from own
   expect(page.done).toBe(true);
   expect(await s.backend.run((ctx) => ctx.db.query("receipts").collect())).toHaveLength(1);
 });
-it("persists unmodified hook NDJSON and projects line callbacks across separate segments", async () => {
-  const s = setup();
-  const terminal = {
-    type: "response.completed",
-    response: {
-      object: "response",
-      id: "synthetic",
-      model: "reported",
-      status: "completed",
-      output: [],
-      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
-    },
-  };
-  const bodies = [
-    ' { "stream":true, "token":"content", "image":{"url":"data:image/png;base64,aGVsbG8="} } ',
-    '{"secret":"executed tool argument"}',
-    "event: response.completed",
-    "data: " + JSON.stringify(terminal),
-    "",
-  ];
-  const observations: CaptureObservationV1[] = [];
-  for (const [index, body] of bodies.entries()) {
-    const bytes = encode.encode(body);
-    const o: CaptureObservationV1 = {
-      ...events[0]!,
-      redactionVersion: undefined,
-      capturePolicy: "hook-body-v1",
-      pluginVersion: "0.2.0",
-      route: "POST /v1/responses",
-      sourceFormat: "openai-response",
-      sequence: index + 1,
-      kind:
-        index === 0
-          ? "request"
-          : index === 1
-            ? "request_after_auth"
-            : index === 4
-              ? "completion"
-              : "stream_chunk",
-      body: btoa(String.fromCharCode(...bytes)),
-      contentBytes: bytes.length,
-      contentSha256: await sha256(bytes),
-      ...(index === 1
-        ? {
-            executionModel: "selected",
-            executionProtocol: "openai-response",
-            selectedAuthId: "auth-id",
-            selectedAuthIndex: "auth-index",
-          }
-        : {}),
-      ...(index === 2 || index === 3
-        ? { bodyFraming: "stock_hook_chunk", stockChunkIndex: index - 2 }
-        : {}),
-      ...(index === 4 ? { completionOutcome: "succeeded" } : {}),
+it.each(["hook-body-v1", "hook-content-block-v1"] as const)(
+  "persists exact %s NDJSON and projects separate segments",
+  async (policy) => {
+    const s = setup();
+    const terminal = {
+      type: "response.completed",
+      response: {
+        object: "response",
+        id: "synthetic",
+        model: "reported",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+      },
     };
-    observations.push(o);
-    const segment = await envelope([o]);
-    expect((await s.post(segment)).status).toBe(200);
-    const callId = await callIdentity(o);
-    expect(await projectPendingSegments(s.ctx, { ...s.options, callId })).toMatchObject({
-      progressed: true,
+    const bodies = [
+      ' { "stream":true, "token":"content", "image":{"url":"data:image/png;base64,aGVsbG8="} } ',
+      '{"secret":"executed tool argument"}',
+      "event: response.completed",
+      "data: " + JSON.stringify(terminal),
+      "",
+    ];
+    const observations: CaptureObservationV1[] = [];
+    for (const [index, body] of bodies.entries()) {
+      const bytes = encode.encode(body);
+      const o: CaptureObservationV1 = {
+        ...events[0]!,
+        redactionVersion: undefined,
+        capturePolicy: policy,
+        pluginVersion: "0.2.0",
+        route: "POST /v1/responses",
+        sourceFormat: "openai-response",
+        sequence: index + 1,
+        kind:
+          index === 0
+            ? "request"
+            : index === 1
+              ? "request_after_auth"
+              : index === 4
+                ? "completion"
+                : "stream_chunk",
+        body: btoa(String.fromCharCode(...bytes)),
+        contentBytes: bytes.length,
+        contentSha256: await sha256(bytes),
+        ...(index === 1
+          ? {
+              executionModel: "selected",
+              executionProtocol: "openai-response",
+              selectedAuthId: "auth-id",
+              selectedAuthIndex: "auth-index",
+            }
+          : {}),
+        ...(index === 2 || index === 3
+          ? {
+              bodyFraming: policy === "hook-body-v1" ? "stock_hook_chunk" : "stock_hook_block",
+              stockChunkIndex: index - 2,
+              ...(policy === "hook-content-block-v1"
+                ? { stockHookChunkLengths: [bytes.length] }
+                : {}),
+            }
+          : {}),
+        ...(index === 4 ? { completionOutcome: "succeeded" } : {}),
+      };
+      observations.push(o);
+      const segment = await envelope([o]);
+      expect((await s.post(segment)).status).toBe(200);
+      const callId = await callIdentity(o);
+      expect(await projectPendingSegments(s.ctx, { ...s.options, callId })).toMatchObject({
+        progressed: true,
+      });
+      expect(
+        [...s.blobs.values()].some(
+          (raw) => new TextDecoder().decode(raw) === JSON.stringify(o) + "\n",
+        ),
+      ).toBe(true);
+    }
+    const callId = await callIdentity(observations[0]!);
+    const stored = await s.backend.query(api.queries.getCall, {
+      destinationId: s.options.destinationId,
+      callId,
     });
-    expect(
-      [...s.blobs.values()].some(
-        (raw) => new TextDecoder().decode(raw) === JSON.stringify(o) + "\n",
-      ),
-    ).toBe(true);
-  }
-  const callId = await callIdentity(observations[0]!);
-  const stored = await s.backend.query(api.queries.getCall, {
-    destinationId: s.options.destinationId,
-    callId,
-  });
-  expect(JSON.parse(stored!.summaryJson)).toMatchObject({
-    state: "succeeded",
-    totalTokens: 10,
-    executionModel: "selected",
-    selectedAuthId: "auth-id",
-    providerName: "openai",
-    providerProvenance: "derived_from_wire_format",
-    capture: {
-      raw: "complete",
-      projection: "complete",
-      usage: "complete",
-      capturePolicy: "hook-body-v1",
-    },
-  });
-});
+    expect(JSON.parse(stored!.summaryJson)).toMatchObject({
+      state: "succeeded",
+      totalTokens: 10,
+      executionModel: "selected",
+      selectedAuthId: "auth-id",
+      providerName: "openai",
+      providerProvenance: "derived_from_wire_format",
+      capture: {
+        raw: "complete",
+        projection: "complete",
+        usage: "complete",
+        capturePolicy: policy,
+      },
+    });
+  },
+);
 it("derives provider identity, cost provenance and tokens when reading older summaries", async () => {
   const s = setup();
   const named = events.map((o) => ({ ...o, requestId: "named-provider" }));
@@ -734,3 +743,36 @@ it.each([false, true])(
     }
   },
 );
+
+it("persists exact content-health counters and accepts previous senders", async () => {
+  const s = setup();
+  const content = {
+    observedBytes: 100,
+    committedBytes: 80,
+    lostBytes: 10,
+    unconfirmedBytes: 10,
+    unknownLosses: 0,
+    streamCallbacks: 3,
+    incompleteCalls: 1,
+    capacityRejections: 1,
+    retainedChargedBytes: 0,
+    peakChargedBytes: 8192,
+  };
+  const record = healthRecord({ content });
+  expect((await s.post(record)).status).toBe(200);
+  const row = await s.backend.query(api.queries.getBootHealth, {
+    destinationId: record.destinationId,
+    instanceId: record.instanceId,
+    pluginBootId: record.pluginBootId,
+  });
+  expect(JSON.parse(row!.healthJson).content).toEqual(content);
+  for (const bad of [
+    { ...content, lostBytes: -1 },
+    { ...content, observedBytes: undefined },
+    { ...content, extra: 0 },
+    { ...content, retainedChargedBytes: 9000 },
+  ]) {
+    expect((await s.post(healthRecord({ content: bad }))).status).toBe(400);
+  }
+  expect((await s.post(healthRecord())).status).toBe(200);
+});

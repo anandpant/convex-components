@@ -159,7 +159,7 @@ func TestDestinationBudgetBacklogBurst(t *testing.T) {
 				}
 			}
 			h.Body = nil
-			h.Outcome = "success"
+			h.Outcome = "succeeded"
 			raw, _ = json.Marshal(h)
 			engine.Observe("request.complete", raw)
 		}(stream)
@@ -186,13 +186,51 @@ func TestDestinationBudgetBacklogBurst(t *testing.T) {
 	if engine.dropped.Load() != 0 || engine.controlLost.Load() != 0 || engine.bytes.Load() != 0 || failures.Load() != 0 {
 		t.Fatalf("capture not lossless under active delivery/backlog: drops=%d lostControl=%d queuedBytes=%d failedAdmission=%d", engine.dropped.Load(), engine.controlLost.Load(), engine.bytes.Load(), failures.Load())
 	}
-	var calls, completions int
-	if err = o.db.QueryRow("SELECT count(*),sum(kind='completion') FROM events WHERE boot=?", engine.boot).Scan(&calls, &completions); err != nil {
+	rows, err := o.db.Query("SELECT payload FROM events WHERE boot=? ORDER BY request_id,sequence", engine.boot)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 3612 || completions != 6 {
-		t.Fatal("bounded callback records missing", calls, completions)
+	defer rows.Close()
+	originals, completions, requests := 0, 0, 0
+	expectedChunk := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"bounded Sol-like text delta from offline fixture\"}\n\n")
+	for rows.Next() {
+		var raw []byte
+		var event Observation
+		if err = rows.Scan(&raw); err != nil || json.Unmarshal(raw, &event) != nil {
+			t.Fatal("invalid committed content", err)
+		}
+		switch event.Kind {
+		case "request":
+			requests++
+			if !bytes.Equal(event.Body, bytes.Repeat([]byte("tool-result"), 6554)) {
+				t.Fatal("request changed")
+			}
+		case "completion":
+			completions++
+			if event.CaptureIncomplete || event.Gap != "" {
+				t.Fatal("incomplete terminal")
+			}
+		case "stream_chunk":
+			offset := 0
+			for _, n := range event.StockHookChunkLengths {
+				if !bytes.Equal(event.Body[offset:offset+n], expectedChunk) {
+					t.Fatal("stream bytes changed")
+				}
+				offset += n
+				originals++
+			}
+			if offset != len(event.Body) {
+				t.Fatal("unaccounted bytes")
+			}
+		}
 	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if originals != 3600 || requests != 6 || completions != 6 {
+		t.Fatal("content or terminals missing", originals, requests, completions)
+	}
+
 	if delivered.Load() < 100 {
 		t.Fatal("receiver stand-in never drained")
 	}

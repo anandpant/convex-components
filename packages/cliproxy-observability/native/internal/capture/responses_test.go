@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -94,12 +95,23 @@ func captureHookBodies(t *testing.T, request, afterAuth string, callbacks []stri
 	for {
 		select {
 		case o := <-delivered:
-			if o.Sequence != uint64(len(observations)+1) || o.ContentBytes != len(o.Body) || o.ContentSHA256 != Digest(o.Body) {
+			if o.ContentBytes != len(o.Body) || o.ContentSHA256 != Digest(o.Body) {
 				t.Fatal("invalid emitted sequence or content identity")
 			}
 			observations = append(observations, o)
-			if o.Kind == "completion" {
-				if !o.ErrorPresent || (len(hook.Error) <= 4096 && o.Error != hook.Error) || (len(hook.Error) > 4096 && (o.Error != "" || len(o.MetadataOmissions) == 0)) {
+			if len(observations) == int(e.observations.Load()) {
+				sort.Slice(observations, func(i, j int) bool { return observations[i].Sequence < observations[j].Sequence })
+				for i, o := range observations {
+					if o.Sequence != uint64(i+1) {
+						t.Fatal("missing sequence")
+					}
+				}
+				o = observations[len(observations)-1]
+				if o.Kind != "completion" {
+					t.Fatal("completion absent")
+				}
+
+				if !o.ErrorPresent || (len(hook.Error) <= MaxBody && o.Error != hook.Error) || (len(hook.Error) > MaxBody && (o.Error != "" || len(o.MetadataOmissions) == 0)) {
 					t.Fatal("recorded diagnostic changed")
 				}
 				return observations
@@ -121,11 +133,8 @@ func TestHookContentFidelity(t *testing.T) {
 	if observations[1].Kind != "request_after_auth" || observations[1].ExecutionModel != "executed-model" || observations[1].ExecutionProtocol != "openai-response" || observations[1].SelectedAuthID != "selected-id" || observations[1].SelectedAuthIndex != "selected-index" {
 		t.Fatal("after-auth evidence missing")
 	}
-	for i, o := range observations[2 : len(observations)-1] {
-		if string(o.Body) != callbacks[i] || o.BodyFraming != "stock_hook_chunk" || o.ChunkIndex == nil || *o.ChunkIndex != i || o.ObservedBodyBytes != len(callbacks[i]) || o.Gap != "" || o.CapturePolicy != CapturePolicy {
-			t.Fatalf("callback %d changed", i)
-		}
-	}
+	assertHookChunks(t, observations[2:len(observations)-1], callbacks)
+
 }
 
 func TestHookRetainsEverySplitAndMalformedBytes(t *testing.T) {
@@ -136,11 +145,8 @@ func TestHookRetainsEverySplitAndMalformedBytes(t *testing.T) {
 	}
 	callbacks = append(callbacks, "event: response.completed", `data: {"truncated":`, "data: {bad}\n\n", string([]byte{0xff, 0, 0x80}))
 	observations := captureHookBodies(t, `{"stream":true}`, "", callbacks)
-	for i, o := range observations[1 : len(observations)-1] {
-		if !bytes.Equal(o.Body, []byte(callbacks[i])) || o.Gap != "" {
-			t.Fatalf("callback %d was rewritten or withheld", i)
-		}
-	}
+	assertHookChunks(t, observations[1:len(observations)-1], callbacks)
+
 }
 
 func TestHookBodyLimitRemainsExplicit(t *testing.T) {
@@ -166,14 +172,39 @@ func TestCredentialMetadataOmissionPreservesContent(t *testing.T) {
 }
 
 func TestCompletionDiagnosticFidelityAndBound(t *testing.T) {
-	for _, diagnostic := range []string{"request failed: token=" + testConfig().Bindings[0].Key, strings.Repeat("x", 4097)} {
+	for _, diagnostic := range []string{"request failed: token=" + testConfig().Bindings[0].Key, strings.Repeat("x", 4097), strings.Repeat("y", MaxBody+1)} {
 		observations := captureHookBodies(t, `{"stream":true}`, "", nil, diagnostic)
 		o := observations[len(observations)-1]
-		if len(diagnostic) <= 4096 && o.Error != diagnostic {
+		if len(diagnostic) <= MaxBody && o.Error != diagnostic {
 			t.Fatal("private diagnostic content scrubbed")
 		}
-		if len(diagnostic) > 4096 && (o.Error != "" || o.MetadataOmissions[0] != "error:limit" || o.Gap != "diagnostic_text_limit" || o.ObservedErrorBytes != len(diagnostic)) {
+		if len(diagnostic) > MaxBody && (o.Error != "" || o.MetadataOmissions[0] != "error:limit" || o.Gap != "diagnostic_text_limit" || o.ObservedErrorBytes != len(diagnostic)) {
 			t.Fatal("diagnostic bound not explicit")
 		}
+	}
+}
+
+// Assert exact original bytes/boundaries, independent of the number of records.
+func assertHookChunks(t *testing.T, observations []Observation, callbacks []string) {
+	t.Helper()
+	index := 0
+	for _, o := range observations {
+		if o.BodyFraming != "stock_hook_block" || o.ChunkIndex == nil || *o.ChunkIndex != index || o.ObservedBodyBytes != len(o.Body) || o.Gap != "" || o.CapturePolicy != CapturePolicy {
+			t.Fatalf("block %d changed: %+v", index, o)
+		}
+		if err := o.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		offset := 0
+		for _, n := range o.StockHookChunkLengths {
+			if index >= len(callbacks) || !bytes.Equal(o.Body[offset:offset+n], []byte(callbacks[index])) {
+				t.Fatalf("callback %d changed", index)
+			}
+			offset += n
+			index++
+		}
+	}
+	if index != len(callbacks) {
+		t.Fatalf("retained %d/%d callbacks", index, len(callbacks))
 	}
 }

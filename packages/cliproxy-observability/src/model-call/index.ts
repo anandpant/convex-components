@@ -126,7 +126,9 @@ export type ModelCallV1 = {
     parserVersion: string;
     pluginVersion?: string;
     redactionVersion?: string;
-    capturePolicy?: "hook-body-v1";
+    capturePolicy?: "hook-body-v1" | "hook-content-block-v1";
+    incomplete?: boolean;
+    lostContentBytes?: number;
     lastObservedAt?: string;
   };
   receivedAt: number;

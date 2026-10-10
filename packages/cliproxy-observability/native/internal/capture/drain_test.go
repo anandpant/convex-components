@@ -15,7 +15,7 @@ import (
 )
 
 func drainEvent(sequence uint64, bodyBytes int) []byte {
-	e := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: CapturePolicy, BodyFraming: "stock_hook_chunk", Destination: "prod", Instance: "instance", Boot: "boot", RequestID: "request", Sequence: sequence, Kind: "stream_chunk", ObservedAt: "2026-09-28T15:29:23Z", Route: "POST /v1/messages", Revision: "r1", Body: bytes.Repeat([]byte("x"), bodyBytes)}
+	e := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: "hook-body-v1", BodyFraming: "stock_hook_chunk", Destination: "prod", Instance: "instance", Boot: "boot", RequestID: "request", Sequence: sequence, Kind: "stream_chunk", ObservedAt: "2026-09-28T15:29:23Z", Route: "POST /v1/messages", Revision: "r1", Body: bytes.Repeat([]byte("x"), bodyBytes)}
 	e.ContentBytes, e.ContentSHA256 = len(e.Body), Digest(e.Body)
 	raw, _ := json.Marshal(e)
 	return raw

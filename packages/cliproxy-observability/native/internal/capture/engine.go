@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -30,6 +29,11 @@ type Hook struct {
 	Error string
 }
 type scopeState struct {
+	block                *Observation
+	blockCharge          int
+	blockStarted         time.Time
+	lostBytes            uint64
+	scopeCharge          int
 	binding              Binding
 	route                string
 	start                time.Time
@@ -45,12 +49,18 @@ type queued struct {
 	size int
 }
 type capturePipe struct {
-	queue   chan queued
-	control chan queued
-	bytes   atomic.Int64
-	budget  int
+	items        atomic.Int64
+	controlItems atomic.Int64
+	queue        chan queued
+	control      chan queued
+	bytes        atomic.Int64
+	budget       int
 }
 type Engine struct {
+	content      contentCounters
+	closing      bool
+	flushDone    chan struct{}
+	closeOnce    sync.Once
 	admission    admissionCounters
 	config       Config
 	boot         string
@@ -77,10 +87,10 @@ func NewEngine(c Config) *Engine {
 		destinations[binding.Destination] = true
 	}
 	count := max(1, len(destinations))
-	e := &Engine{config: c, boot: BootID(), scopes: map[string]*scopeState{}, pipes: map[string]*capturePipe{}, started: time.Now().UTC().Format(time.RFC3339Nano), healthDone: make(chan struct{}), cancel: cancel, done: make(chan struct{})}
+	e := &Engine{config: c, boot: BootID(), scopes: map[string]*scopeState{}, pipes: map[string]*capturePipe{}, started: time.Now().UTC().Format(time.RFC3339Nano), healthDone: make(chan struct{}), flushDone: make(chan struct{}), cancel: cancel, done: make(chan struct{})}
 	var workers sync.WaitGroup
 	for destination := range destinations {
-		pipe := &capturePipe{queue: make(chan queued, max(1, 1024/count)), control: make(chan queued, max(1, 128/count)), budget: c.QueueBytes / count}
+		pipe := &capturePipe{queue: make(chan queued, max(1, 256/count)), control: make(chan queued, max(1, min(128, c.QueueBytes/8/controlRecordCharge)/count)), budget: c.QueueBytes / count}
 		e.pipes[destination] = pipe
 		workers.Add(2)
 		go func() { defer workers.Done(); e.worker(ctx, pipe) }()
@@ -88,24 +98,29 @@ func NewEngine(c Config) *Engine {
 	}
 	go func() { workers.Wait(); close(e.done) }()
 	go e.healthLoop(ctx)
+	go e.flushLoop(ctx)
 	return e
 }
-func (e *Engine) Close() { e.cancel(); <-e.done; <-e.healthDone }
+func (e *Engine) Close() { e.closeContent() }
 func (e *Engine) Status() map[string]any {
-	return map[string]any{"localAdmission": e.admission.snapshot(), "queuedBytes": e.bytes.Load(), "droppedObservations": e.dropped.Load(), "lostControlObservations": e.controlLost.Load(), "expiredScopes": e.expired.Load(), "excludedCallbacks": e.excluded.Load(), "scopeConflicts": e.conflicts.Load(), "precommitCoverage": "unknown_on_process_loss"}
+	return map[string]any{"content": e.content.snapshot(e.bytes.Load()), "localAdmission": e.admission.snapshot(), "queuedBytes": e.bytes.Load(), "droppedObservations": e.dropped.Load(), "lostControlObservations": e.controlLost.Load(), "expiredScopes": e.expired.Load(), "excludedCallbacks": e.excluded.Load(), "scopeConflicts": e.conflicts.Load(), "precommitCoverage": "unknown_on_process_loss"}
 }
 func (e *Engine) Observe(method string, raw []byte) {
 	if !e.config.Enabled {
 		return
 	}
+	kind := hookKind(method)
+	if kind == "" {
+		return
+	}
 	// Stock host already pays clone/RPC cost. Bound our own retained state and decode.
 	if len(raw) > MaxFrame {
-		e.dropped.Add(1)
+		e.RecordGap(method)
 		return
 	}
 	var h Hook
 	if json.Unmarshal(raw, &h) != nil || !identifier.MatchString(h.RequestID) {
-		e.dropped.Add(1)
+		e.RecordGap(method)
 		return
 	}
 	if len(h.RequestedModel) > 256 {
@@ -120,25 +135,14 @@ func (e *Engine) Observe(method string, raw []byte) {
 	now := time.Now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	s := e.scopes[h.RequestID]
-	kind := ""
-	switch method {
-	case "request.intercept_before":
-		kind = "request"
-	case "request.intercept_after":
-		kind = "request_after_auth"
-	case "response.intercept_after":
-		kind = "response"
-	case "response.intercept_stream_chunk":
-		kind = "stream_chunk"
-		if h.ChunkIndex < 0 {
-			kind = "stream_init"
-		}
-	case "request.complete":
-		kind = "completion"
-	default:
+	if e.closing {
 		return
 	}
+	s := e.scopes[h.RequestID]
+	if kind == "stream_chunk" && h.ChunkIndex < 0 {
+		kind = "stream_init"
+	}
+
 	if s == nil {
 		// Never enroll a half-observed stream, unknown completion, or arbitrary response.
 		if kind != "request" && !(kind == "response" && h.Model == "" && h.RequestedModel == "") {
@@ -162,10 +166,17 @@ func (e *Engine) Observe(method string, raw []byte) {
 			return
 		}
 		if len(e.scopes) >= e.config.MaxActive {
+			e.content.unknownLoss.Add(1)
 			e.dropped.Add(1)
 			return
 		}
-		s = &scopeState{binding: b, route: route, start: now, last: now, correlation: map[string]string{}, trace: h.TraceID, format: h.SourceFormat, model: h.RequestedModel}
+		pipe := e.pipes[b.Destination]
+		if !e.reserveBytes(pipe, scopeMetadataCharge, false) {
+			e.dropped.Add(1)
+			e.content.unknownLoss.Add(1)
+			return
+		}
+		s = &scopeState{scopeCharge: scopeMetadataCharge, binding: b, route: route, start: now, last: now, correlation: map[string]string{}, trace: h.TraceID, format: h.SourceFormat, model: h.RequestedModel}
 		for header, field := range map[string]string{"X-Meshix-Request-Id": "requestId", "X-Meshix-Run-Id": "runId", "X-Meshix-Job-Id": "jobId", "X-Meshix-Trace-Id": "traceId", "X-Opencode-Session-Id": "opencodeSessionId", "X-Meshix-Root-Execution-Id": "rootExecutionId", "X-Meshix-Operation-Id": "operationId", "X-Meshix-Step-Id": "stepId", "X-Meshix-Part-Id": "partId", "X-Meshix-Attempt-Id": "attemptId"} {
 			v, ok := ExactlyOne(headers, header)
 			if ok && len(v) <= 256 {
@@ -184,9 +195,26 @@ func (e *Engine) Observe(method string, raw []byte) {
 		return
 	} // Repeated before hook cannot rebind scope.
 	s.last = now
-	e.observations.Add(1)
-	s.sequence++
-	o := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: CapturePolicy, Destination: s.binding.Destination, Instance: e.config.Instance, Boot: e.boot, RequestID: h.RequestID, Sequence: s.sequence, Kind: kind, ObservedAt: now.UTC().Format(time.RFC3339Nano), OffsetNS: now.Sub(s.start).Nanoseconds(), Route: s.route, Revision: e.config.Revision, SourceFormat: s.format, Model: s.model, TraceID: s.trace, Correlation: maps.Clone(s.correlation), CorrelationConflicts: append([]string(nil), s.conflicts...)}
+	if kind == "stream_chunk" {
+		var body []byte
+		if len(h.Body) > 0 && json.Unmarshal(h.Body, &body) != nil {
+			e.content.unknownLoss.Add(1)
+			e.markIncomplete(s, 0)
+			e.emitStreamGap(s, h.RequestID, now, "invalid_body_encoding", 0)
+			return
+		}
+		e.content.streamCallbacks.Add(1)
+		e.content.observed.Add(uint64(len(body)))
+		if len(body) > MaxBody {
+			e.markIncomplete(s, uint64(len(body)))
+			e.emitStreamGap(s, h.RequestID, now, "observation_body_limit", len(body))
+			return
+		}
+		e.appendStream(s, h.RequestID, body, h.ChunkIndex, now)
+		return
+	}
+	e.flushStream(s)
+	o := e.allocateObservation(s, h.RequestID, kind, now)
 	if kind == "request_after_auth" {
 		if len(h.Model) <= 256 {
 			o.ExecutionModel = h.Model
@@ -203,11 +231,6 @@ func (e *Engine) Observe(method string, raw []byte) {
 		o.SelectedAuthID = metadataIdentity(h.Metadata.SelectedAuthID, "selectedAuthId", &o)
 		o.SelectedAuthIndex = metadataIdentity(h.Metadata.SelectedAuthIndex, "selectedAuthIndex", &o)
 	}
-	if kind == "stream_chunk" {
-		o.BodyFraming = "stock_hook_chunk"
-		index := h.ChunkIndex
-		o.ChunkIndex = &index
-	}
 	if kind == "completion" {
 		o.Outcome = h.Outcome
 		o.StatusCode = h.StatusCode
@@ -216,14 +239,14 @@ func (e *Engine) Observe(method string, raw []byte) {
 		if h.Error != "" {
 			o.ErrorPresent = true
 			o.ObservedErrorBytes = len(h.Error)
-			if len(h.Error) <= 4096 {
+			if len(h.Error) <= MaxBody {
 				o.Error = h.Error
 			} else {
 				o.MetadataOmissions = append(o.MetadataOmissions, "error:limit")
 				o.Gap = "diagnostic_text_limit"
 			}
 		}
-		delete(e.scopes, h.RequestID)
+
 	}
 	if kind == "response" {
 		o.StatusCode = h.StatusCode
@@ -239,28 +262,29 @@ func (e *Engine) Observe(method string, raw []byte) {
 		}
 	}
 	excludeCredentialMetadata(&o, e.config.Bindings)
+	e.content.observed.Add(uint64(o.ObservedBodyBytes + o.ObservedErrorBytes))
+	if o.Gap == "invalid_body_encoding" {
+		e.content.unknownLoss.Add(1)
+		e.markIncomplete(s, 0)
+	}
+	if o.ObservedBodyBytes > len(o.Body) || o.ObservedErrorBytes > len(o.Error) {
+		e.markIncomplete(s, uint64(o.ObservedBodyBytes-len(o.Body)+o.ObservedErrorBytes-len(o.Error)))
+	}
 	if s.captureLost {
-		o.Body = nil
-		o.Gap = "prior_capture_gap"
+		if o.Gap == "" {
+			o.Gap = "prior_capture_gap"
+		}
+		o.CaptureIncomplete = true
+		o.LostContentBytes = s.lostBytes
 	}
-	size := len(o.Body) + len(o.Error) + 8192
-	pipe := e.pipes[o.Destination]
-	if pipe.bytes.Load()+int64(size) > int64(pipe.budget) {
-		s.captureLost = true
-		e.reserveGap(o, "capture_queue_byte_limit")
-		return
+
+	e.enqueueObservation(s, o, 0)
+	if kind == "completion" {
+		delete(e.scopes, h.RequestID)
+		e.releaseBytes(e.pipes[s.binding.Destination], s.scopeCharge)
+		s.scopeCharge = 0
 	}
-	e.bytes.Add(int64(size))
-	pipe.bytes.Add(int64(size))
-	select {
-	case pipe.queue <- queued{o, size}:
-		recordPeak(&e.admission.queuePeak, int64(len(pipe.queue)))
-	default:
-		e.bytes.Add(-int64(size))
-		pipe.bytes.Add(-int64(size))
-		s.captureLost = true
-		e.reserveGap(o, "capture_queue_item_limit")
-	}
+
 }
 func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -273,6 +297,7 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 		case <-ctx.Done():
 			return
 		case q := <-pipe.queue:
+
 			o := q.o
 			o.DroppedObservations = e.dropped.Load()
 			o.ScopeConflicts = e.conflicts.Load()
@@ -281,8 +306,11 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 			raw, err := json.Marshal(o)
 			if err != nil || len(raw) > MaxFrame {
 				e.dropped.Add(1)
-				e.bytes.Add(-int64(q.size))
-				pipe.bytes.Add(-int64(q.size))
+				e.releaseBytes(pipe, q.size)
+				pipe.items.Add(-1)
+
+				e.content.lost.Add(uint64(len(o.Body) + len(o.Error)))
+
 				continue
 			}
 			// Retain the same serialized identity until a durable ACK. No inference goroutine waits here.
@@ -306,29 +334,50 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 				}
 				select {
 				case <-ctx.Done():
+					e.content.unconfirmed.Add(uint64(len(o.Body) + len(o.Error)))
+					e.releaseBytes(pipe, q.size)
+					pipe.items.Add(-1)
+
 					return
 				case <-time.After(250 * time.Millisecond):
 				}
 			}
-			e.bytes.Add(-int64(q.size))
-			pipe.bytes.Add(-int64(q.size))
+			e.content.committed.Add(uint64(len(o.Body) + len(o.Error)))
+			e.releaseBytes(pipe, q.size)
+			pipe.items.Add(-1)
+
 		}
 	}
 }
-func (e *Engine) RecordGap() { e.dropped.Add(1) }
 
-// Reserved metadata-only gaps preserve the allocated sequence where possible. If this
-// bounded reserve also fills, heartbeat counters explicitly report unknown coverage.
-func (e *Engine) reserveGap(o Observation, reason string) {
-	e.dropped.Add(1)
-	o.Body = nil
-	o.Gap = reason
-	o.ContentBytes = 0
-	o.ContentSHA256 = Digest(nil)
-	select {
-	case e.pipes[o.Destination].control <- queued{o: o, size: 0}:
-		recordPeak(&e.admission.controlPeak, int64(len(e.pipes[o.Destination].control)))
-	default:
-		e.controlLost.Add(1)
+// An oversized/unreadable RPC cannot be attributed safely. Mark active calls
+// incomplete rather than claiming their later terminal proves complete content.
+func (e *Engine) RecordGap(method string) {
+	if hookKind(method) == "" {
+		return
 	}
+	e.dropped.Add(1)
+	e.content.unknownLoss.Add(1)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for request, s := range e.scopes {
+		e.markIncomplete(s, 0)
+		e.emitStreamGap(s, request, time.Now(), "unattributed_rpc_gap", 0)
+	}
+}
+
+func hookKind(method string) string {
+	switch method {
+	case "request.intercept_before":
+		return "request"
+	case "request.intercept_after":
+		return "request_after_auth"
+	case "response.intercept_after":
+		return "response"
+	case "response.intercept_stream_chunk":
+		return "stream_chunk"
+	case "request.complete":
+		return "completion"
+	}
+	return ""
 }

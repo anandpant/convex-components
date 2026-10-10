@@ -1,3 +1,4 @@
+import { expandStockHookBlock } from "./stock-block.js";
 import {
   providerIdentity,
   TOKEN_FIELDS,
@@ -192,6 +193,12 @@ export function applyObservation(
 ): void {
   if (o.sequence !== call.capture.projectedThroughSequence + 1)
     throw new Error("projection sequence gap");
+  if (o.captureIncomplete) call.capture.incomplete = true;
+  if (o.lostContentBytes !== undefined)
+    call.capture.lostContentBytes = Math.max(
+      call.capture.lostContentBytes ?? 0,
+      o.lostContentBytes,
+    );
   if (o.gap) {
     state.rawGap = true;
     if (!call.capture.gaps.includes(o.gap) && call.capture.gaps.length < 8)
@@ -244,9 +251,16 @@ export function applyObservation(
       }
       if ((o.kind === "stream_chunk" || o.kind === "completion") && body.length) {
         const reader = new SSEReader(state.sse);
-        for (const frame of o.bodyFraming === "stock_hook_chunk"
-          ? reader.feedStock(body, call.clientProtocol, o.observedAt)
-          : reader.feed(body, o.observedAt)) {
+        const pieces =
+          o.bodyFraming === "stock_hook_block"
+            ? expandStockHookBlock(body, o.stockHookChunkLengths ?? [])
+            : [body];
+        const frames = pieces.flatMap((piece) =>
+          o.bodyFraming === "stock_hook_chunk" || o.bodyFraming === "stock_hook_block"
+            ? reader.feedStock(piece, call.clientProtocol, o.observedAt)
+            : reader.feed(piece, o.observedAt),
+        );
+        for (const frame of frames) {
           if (frame.data === "[DONE]") {
             if (call.clientProtocol === "chat_completions" && state.chatFinished)
               state.terminal = "completed";
@@ -287,17 +301,19 @@ export function applyObservation(
       call.latencyMs = Number(BigInt(call.endTimeUnixNano) - BigInt(start)) / 1e6;
     call.capture.terminalSequence = o.sequence;
     call.state =
-      o.completionOutcome === "canceled"
-        ? "aborted"
-        : o.completionOutcome === "failed"
-          ? "failed"
-          : o.completionOutcome === "rejected"
-            ? "rejected"
-            : state.terminal === "completed"
-              ? "succeeded"
-              : state.terminal === "failed" || state.terminal === "incomplete"
-                ? "failed"
-                : "unknown";
+      o.completionOutcome === undefined && o.captureIncomplete
+        ? "unknown"
+        : o.completionOutcome === "canceled"
+          ? "aborted"
+          : o.completionOutcome === "failed"
+            ? "failed"
+            : o.completionOutcome === "rejected"
+              ? "rejected"
+              : state.terminal === "completed"
+                ? "succeeded"
+                : state.terminal === "failed" || state.terminal === "incomplete"
+                  ? "failed"
+                  : "unknown";
   }
   call.protocolTerminal = state.terminal;
   const final =

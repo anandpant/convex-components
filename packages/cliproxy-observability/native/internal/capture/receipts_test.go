@@ -143,7 +143,7 @@ func TestReceiptMoveRollsBackAsOneTransaction(t *testing.T) {
 		t.Fatal("ACK receipt missing")
 	}
 	// Replays remain exact after durable ACK and payload clearing.
-	e := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: CapturePolicy, BodyFraming: "stock_hook_chunk", Destination: "dev", Instance: "instance", Boot: "boot", RequestID: "request", Sequence: 1, Kind: "stream_chunk", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Route: "POST /v1/messages", Revision: "r1", Body: []byte("different")}
+	e := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: "hook-body-v1", BodyFraming: "stock_hook_chunk", Destination: "dev", Instance: "instance", Boot: "boot", RequestID: "request", Sequence: 1, Kind: "stream_chunk", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Route: "POST /v1/messages", Revision: "r1", Body: []byte("different")}
 	e.ContentBytes = len(e.Body)
 	e.ContentSHA256 = Digest(e.Body)
 	raw, _ := json.Marshal(e)
@@ -190,7 +190,7 @@ func BenchmarkReceiptLedger1600000(b *testing.B) {
 		b.Fatal(err)
 	}
 	lookupMicros := float64(time.Since(start).Microseconds())
-	event := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: CapturePolicy, Destination: "prod", Instance: "instance", Boot: "boot", RequestID: "new-request", Kind: "stream_chunk", BodyFraming: "stock_hook_chunk", Route: "POST /v1/messages", Revision: "r1", Body: []byte("data: test\n\n")}
+	event := Observation{SchemaVersion: 1, PluginVersion: Version, CapturePolicy: "hook-body-v1", Destination: "prod", Instance: "instance", Boot: "boot", RequestID: "new-request", Kind: "stream_chunk", BodyFraming: "stock_hook_chunk", Route: "POST /v1/messages", Revision: "r1", Body: []byte("data: test\n\n")}
 	event.ContentBytes = len(event.Body)
 	event.ContentSHA256 = Digest(event.Body)
 	b.ResetTimer()

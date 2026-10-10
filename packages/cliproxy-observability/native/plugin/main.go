@@ -108,13 +108,18 @@ func dispatch(method string, raw []byte, oversized bool) (any, bool) {
 		}
 		return map[string]any{"schema_version": 6, "metadata": map[string]string{"name": "cliproxy-capture", "version": capture.Version, "author": "shpitdev", "GitHubRepository": "https://github.com/anandpant/convex-components"}, "capabilities": map[string]bool{"request_interceptor": true, "response_interceptor": true, "response_stream_interceptor": true, "request_lifecycle_plugin": true}}, true
 	case "plugin.quiesce", "plugin.shutdown":
+		mu.Lock()
+		if engine != nil {
+			engine.Close()
+		}
+		mu.Unlock()
 		return map[string]any{}, true
 	}
 	mu.RLock()
 	defer mu.RUnlock()
 	if engine != nil {
 		if oversized {
-			engine.RecordGap()
+			engine.RecordGap(method)
 		} else {
 			engine.Observe(method, raw)
 		}

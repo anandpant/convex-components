@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.5
+
+- Native 0.2.3 pins go-sqlite3 1.14.52 with SQLite 3.53.4, which includes
+  SQLite's WAL-reset corruption fix. Capture format, receipt identity, storage
+  limits, queueing, FULL-sync durability and receiver code are unchanged.
+- Qualify the native binary pair against current data and prior-version reopen
+  before activation. This correctness update does not resolve capture burst loss.
+
+## 0.3.4
+
+- Native 0.2.2 keeps exact per-destination pending-byte counters through
+  transactional triggers, so admission no longer rescans the capture backlog.
+  Report private local admission latency, failures and queue peaks separately
+  from remote delivery. Receiver code and its schema are unchanged.
+
 ## 0.3.3
 
 - Separate immutable acknowledged receipts from mutable pending payloads, retaining

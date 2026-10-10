@@ -15,6 +15,25 @@ No deployed receiver or browser proof is claimed by these tests.
 
 ## Native receipt storage and capacity
 
+Native 0.2.2 removes the backlog scan from each destination-budget admission.
+SQLite triggers maintain pending bytes per destination across insert, delete,
+payload/state/destination changes and ACK rollback. Startup recounts every
+pending destination and refuses a mismatch without repairing or discarding data.
+The wire schema, queue sizes, byte budgets, retries and indefinite retention stay
+unchanged. A content-free `localAdmission` field in private boot health reports
+Unix admission attempts, exact ACKs, 507/other failures, total/max round-trip
+latency and sampled per-destination queue peaks. Receiver 0.3.3 accepts that
+optional field but does not project it; inspect the local persisted health row.
+These metrics describe local admission, not remote delivery or lossless capture.
+
+The offline admission regression seeds 25,000 pending rows (about 148 MB),
+enables real delivery and destination budgets, and runs six concurrent Sol-like
+streams at 100 chunks/sec each. Its receiver stand-in drains at 50 events/sec.
+It verifies complete local capture under that bounded burst; it does not prove
+that a sustained campaign fits remote delivery throughput or finite storage.
+Migration and rollback against current production data, exact Linux artifacts
+and a separate coordinator window remain required before live replacement.
+
 Native 0.2.1 stores immutable ACK receipts separately from pending payloads. The
 `events` read view reconstructs every historical field, including exact identity,
 digest, scope, timestamp and batch ID. Pending payloads move to the receipt ledger

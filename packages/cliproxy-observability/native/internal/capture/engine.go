@@ -51,6 +51,7 @@ type capturePipe struct {
 	budget  int
 }
 type Engine struct {
+	admission    admissionCounters
 	config       Config
 	boot         string
 	mu           sync.Mutex
@@ -91,7 +92,7 @@ func NewEngine(c Config) *Engine {
 }
 func (e *Engine) Close() { e.cancel(); <-e.done; <-e.healthDone }
 func (e *Engine) Status() map[string]any {
-	return map[string]any{"queuedBytes": e.bytes.Load(), "droppedObservations": e.dropped.Load(), "lostControlObservations": e.controlLost.Load(), "expiredScopes": e.expired.Load(), "excludedCallbacks": e.excluded.Load(), "scopeConflicts": e.conflicts.Load(), "precommitCoverage": "unknown_on_process_loss"}
+	return map[string]any{"localAdmission": e.admission.snapshot(), "queuedBytes": e.bytes.Load(), "droppedObservations": e.dropped.Load(), "lostControlObservations": e.controlLost.Load(), "expiredScopes": e.expired.Load(), "excludedCallbacks": e.excluded.Load(), "scopeConflicts": e.conflicts.Load(), "precommitCoverage": "unknown_on_process_loss"}
 }
 func (e *Engine) Observe(method string, raw []byte) {
 	if !e.config.Enabled {
@@ -253,6 +254,7 @@ func (e *Engine) Observe(method string, raw []byte) {
 	pipe.bytes.Add(int64(size))
 	select {
 	case pipe.queue <- queued{o, size}:
+		recordPeak(&e.admission.queuePeak, int64(len(pipe.queue)))
 	default:
 		e.bytes.Add(-int64(size))
 		pipe.bytes.Add(-int64(size))
@@ -285,16 +287,20 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 			}
 			// Retain the same serialized identity until a durable ACK. No inference goroutine waits here.
 			for {
+				start := time.Now()
 				req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/events", bytes.NewReader(raw))
 				req.Header.Set("Content-Type", "application/json")
 				res, err := client.Do(req)
+				status := 0
 				accepted := false
 				if err == nil {
+					status = res.StatusCode
 					var ack struct{ Identity, Digest string }
 					body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
 					res.Body.Close()
 					accepted = res.StatusCode == 200 && json.Unmarshal(body, &ack) == nil && ack.Identity == o.Identity() && ack.Digest == Digest(raw)
 				}
+				e.admission.record(start, status, accepted)
 				if accepted {
 					break
 				}
@@ -321,6 +327,7 @@ func (e *Engine) reserveGap(o Observation, reason string) {
 	o.ContentSHA256 = Digest(nil)
 	select {
 	case e.pipes[o.Destination].control <- queued{o: o, size: 0}:
+		recordPeak(&e.admission.controlPeak, int64(len(e.pipes[o.Destination].control)))
 	default:
 		e.controlLost.Add(1)
 	}

@@ -77,6 +77,7 @@ func RestoreLegacyOutbox(path string, budget int64, reserve uint64) error {
  DROP TABLE receipt_scopes;
  DROP TABLE receipt_batches;
  DROP TABLE outbox_counts;
+ DROP TABLE IF EXISTS destination_counts;
  ALTER TABLE legacy_events RENAME TO events;
  CREATE INDEX events_call ON events(destination,instance,boot,request_id,sequence);
  CREATE INDEX events_pending ON events(destination,state,received_at);

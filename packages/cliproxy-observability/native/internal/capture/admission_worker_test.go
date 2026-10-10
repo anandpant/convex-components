@@ -62,7 +62,7 @@ func TestWorkerGroupACKLossRetainsExactRecords(t *testing.T) {
 							io.WriteString(w, "invalid")
 						}
 						if fault == "oversized" {
-							w.Write(bytes.Repeat([]byte(" "), 64<<10))
+							w.Write(bytes.Repeat([]byte(" "), maxAdmissionEvents*256))
 						}
 						close(wrongACK)
 						return
@@ -82,6 +82,7 @@ func TestWorkerGroupACKLossRetainsExactRecords(t *testing.T) {
 				q := queued{event, len(event.Body) + 8192}
 				e.bytes.Add(int64(q.size))
 				e.pipes["dev"].bytes.Add(int64(q.size))
+				e.pipes["dev"].items.Add(1)
 				e.pipes["dev"].queue <- q
 			}
 			select {
@@ -105,5 +106,30 @@ func TestWorkerGroupACKLossRetainsExactRecords(t *testing.T) {
 				t.Fatal("lost ACK duplicated, lost or falsely acknowledged records", rows, e.admission.snapshot())
 			}
 		})
+	}
+}
+
+func TestHeldGroupsStayInsideExistingItemAllowances(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "capture-item-bound-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	c := testConfig()
+	c.Socket, c.QueueBytes = filepath.Join(dir, "unavailable.sock"), 16<<20
+	e := NewEngine(c)
+	defer e.Close()
+	h := Hook{RequestID: "bounded-held-group", Headers: testHeaders()}
+	raw, _ := json.Marshal(h)
+	e.Observe("request.intercept_before", raw)
+	h.Body, _ = json.Marshal([]byte("bounded stream content"))
+	for i := 0; i < 2048; i++ {
+		h.ChunkIndex = i
+		raw, _ = json.Marshal(h)
+		e.Observe("response.intercept_stream_chunk", raw)
+	}
+	p := e.pipes["dev"]
+	if p.items.Load() != 1024 || p.controlItems.Load() != 128 || e.dropped.Load() != 1025 || e.controlLost.Load() != 897 {
+		t.Fatal("held groups enlarged or bypassed the existing limits", p.items.Load(), p.controlItems.Load(), e.dropped.Load(), e.controlLost.Load())
 	}
 }

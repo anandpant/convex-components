@@ -42,10 +42,12 @@ type queued struct {
 	size int
 }
 type capturePipe struct {
-	queue   chan queued
-	control chan queued
-	bytes   atomic.Int64
-	budget  int
+	items        atomic.Int64
+	controlItems atomic.Int64
+	queue        chan queued
+	control      chan queued
+	bytes        atomic.Int64
+	budget       int
 }
 type Engine struct {
 	admission    admissionCounters
@@ -247,14 +249,23 @@ func (e *Engine) Observe(method string, raw []byte) {
 		e.reserveGap(o, "capture_queue_byte_limit")
 		return
 	}
+	// Count held groups as outstanding too; batching must not enlarge the
+	// existing 1024/count record allowance by freeing channel slots early.
+	if pipe.items.Add(1) > int64(cap(pipe.queue)) {
+		pipe.items.Add(-1)
+		s.captureLost = true
+		e.reserveGap(o, "capture_queue_item_limit")
+		return
+	}
 	e.bytes.Add(int64(size))
 	pipe.bytes.Add(int64(size))
 	select {
 	case pipe.queue <- queued{o, size}:
-		recordPeak(&e.admission.queuePeak, int64(len(pipe.queue)))
+		recordPeak(&e.admission.queuePeak, pipe.items.Load())
 	default:
 		e.bytes.Add(-int64(size))
 		pipe.bytes.Add(-int64(size))
+		pipe.items.Add(-1)
 		s.captureLost = true
 		e.reserveGap(o, "capture_queue_item_limit")
 	}
@@ -272,10 +283,17 @@ func (e *Engine) reserveGap(o Observation, reason string) {
 	o.Gap = reason
 	o.ContentBytes = 0
 	o.ContentSHA256 = Digest(nil)
+	pipe := e.pipes[o.Destination]
+	if pipe.controlItems.Add(1) > int64(cap(pipe.control)) {
+		pipe.controlItems.Add(-1)
+		e.controlLost.Add(1)
+		return
+	}
 	select {
-	case e.pipes[o.Destination].control <- queued{o: o, size: 0}:
-		recordPeak(&e.admission.controlPeak, int64(len(e.pipes[o.Destination].control)))
+	case pipe.control <- queued{o: o, size: 0}:
+		recordPeak(&e.admission.controlPeak, pipe.controlItems.Load())
 	default:
+		pipe.controlItems.Add(-1)
 		e.controlLost.Add(1)
 	}
 }

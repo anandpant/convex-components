@@ -11,7 +11,7 @@ import (
 // latency is weighted by record count, since every record waits for that ACK.
 // Receiver 0.3.3 accepts/ACKs this optional field but does not project it; the
 // private persisted health row is its authoritative source.
-// Queue peaks are the largest per-destination depth sampled after enqueue.
+// Queue peaks sample outstanding queued and held records per destination.
 type LocalAdmission struct {
 	Requests         uint64 `json:"requests"`
 	Attempts         uint64 `json:"attempts"`

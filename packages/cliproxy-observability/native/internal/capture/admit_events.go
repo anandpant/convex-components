@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-const maxAdmissionEvents = 128
+const maxAdmissionEvents = 512
 
 type eventACK struct {
 	Identity string `json:"identity"`

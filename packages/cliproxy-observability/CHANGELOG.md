@@ -3,7 +3,7 @@
 ## 0.3.5
 
 - Native 0.2.3 groups already queued observations into bounded Unix-socket
-  admissions (at most 128 records and the existing 2 MiB frame). SQLite commits
+  admissions (at most 512 records and the existing 2 MiB frame). SQLite commits
   the group with FULL durability before returning each exact identity/digest.
   A failed group rolls back; an unknown ACK retries the same serialized records.
 - Preserve separate control admission, queue and disk budgets, capture/receiver

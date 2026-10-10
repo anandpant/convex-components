@@ -108,3 +108,28 @@ func TestAdmissionBatchReservedControlAndFrame(t *testing.T) {
 		t.Fatal("frame bound changed", r.Code)
 	}
 }
+
+func TestMaximumAdmissionGroupHasEveryExactACK(t *testing.T) {
+	o := deliveryOutbox(t)
+	records := make([]json.RawMessage, maxAdmissionEvents)
+	for i := range records {
+		records[i] = batchEvent(uint64(i + 1))
+	}
+	r := sendEventBatch(t, o, records...)
+	var acks []eventACK
+	if r.Code != 200 || json.Unmarshal(r.Body.Bytes(), &acks) != nil || len(acks) != maxAdmissionEvents {
+		t.Fatal("maximum group not admitted atomically", r.Code)
+	}
+	for i, ack := range acks {
+		var e Observation
+		json.Unmarshal(records[i], &e)
+		if ack != (eventACK{e.Identity(), Digest(records[i])}) {
+			t.Fatal("maximum group changed a record")
+		}
+	}
+	var rows int
+	o.db.QueryRow("SELECT pending_rows FROM outbox_counts WHERE id=1").Scan(&rows)
+	if rows != maxAdmissionEvents {
+		t.Fatal("maximum group lost records", rows)
+	}
+}

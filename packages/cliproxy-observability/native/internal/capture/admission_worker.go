@@ -19,6 +19,10 @@ type admissionItem struct {
 // Group only already queued records. There is no coalescing timer or extra
 // producer queue; byte accounting stays charged until exact durable ACKs arrive.
 func (e *Engine) admissionWorker(ctx context.Context, pipe *capturePipe, queue <-chan queued, control bool) {
+	pending := &pipe.items
+	if control {
+		pending = &pipe.controlItems
+	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", e.config.Socket)
 	}, MaxConnsPerHost: 1}
@@ -41,6 +45,7 @@ func (e *Engine) admissionWorker(ctx context.Context, pipe *capturePipe, queue <
 			}
 			e.bytes.Add(-int64(q.size))
 			pipe.bytes.Add(-int64(q.size))
+			pending.Add(-1)
 			return nil
 		}
 		return &admissionItem{raw, eventACK{o.Identity(), Digest(raw)}, q.size}
@@ -104,7 +109,8 @@ func (e *Engine) admissionWorker(ctx context.Context, pipe *capturePipe, queue <
 			status, accepted := 0, false
 			if err == nil {
 				status = res.StatusCode
-				body, readErr := io.ReadAll(io.LimitReader(res.Body, (64<<10)+1))
+				const ackLimit = maxAdmissionEvents * 256
+				body, readErr := io.ReadAll(io.LimitReader(res.Body, ackLimit+1))
 				res.Body.Close()
 				var acks []eventACK
 				var decodeErr error
@@ -117,7 +123,7 @@ func (e *Engine) admissionWorker(ctx context.Context, pipe *capturePipe, queue <
 				} else {
 					decodeErr = json.Unmarshal(body, &acks)
 				}
-				accepted = readErr == nil && decodeErr == nil && len(body) <= 64<<10 && status == 200 && len(acks) == len(items)
+				accepted = readErr == nil && decodeErr == nil && len(body) <= ackLimit && status == 200 && len(acks) == len(items)
 				for i := range acks {
 					if i >= len(items) || acks[i] != items[i].ack {
 						accepted = false
@@ -136,6 +142,7 @@ func (e *Engine) admissionWorker(ctx context.Context, pipe *capturePipe, queue <
 		for _, item := range items {
 			e.bytes.Add(-int64(item.size))
 			pipe.bytes.Add(-int64(item.size))
+			pending.Add(-1)
 		}
 	}
 }

@@ -13,13 +13,17 @@ import (
 	"strings"
 )
 
-const Version = "0.2.4"
+const Version = "0.2.5"
 const CapturePolicy = "hook-content-block-v1"
 const MaxBody = 1 << 20
 const MaxFrame = 2 << 20
 
+// MaxBodyParts bounds one split body by the shared data-record slots.
+const MaxBodyParts = contentRecordLimit
+
 var AuthorityHeaders = []string{"X-Meshix-Capture-Destination", "X-Meshix-Capture-Route", "X-Meshix-Capture-Revision"}
 var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$`)
+var sha256Hex = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Binding struct {
 	Key         string `json:"key"`
@@ -197,6 +201,7 @@ type Observation struct {
 	LostContentBytes      uint64            `json:"lostContentBytes,omitempty"`
 	CaptureIncomplete     bool              `json:"captureIncomplete,omitempty"`
 	BodyFraming           string            `json:"bodyFraming,omitempty"`
+	BodyPart              *BodyPart         `json:"bodyPart,omitempty"`
 	Body                  []byte            `json:"body,omitempty"`
 	ContentSHA256         string            `json:"contentSha256"`
 	ContentBytes          int               `json:"contentBytes"`
@@ -210,6 +215,26 @@ type Observation struct {
 	Gap                   string            `json:"gap,omitempty"`
 }
 
+// BodyPart places one exact slice of a body larger than MaxBody. Parts use
+// consecutive sequences; every part except the last holds exactly MaxBody bytes.
+// Readers concatenate them in index order and verify the whole-body digest.
+type BodyPart struct {
+	Index       int    `json:"index"`
+	Count       int    `json:"count"`
+	Offset      int    `json:"offset"`
+	TotalBytes  int    `json:"totalBytes"`
+	TotalSHA256 string `json:"totalSha256"`
+}
+
+func (p *BodyPart) valid(o Observation) bool {
+	switch o.Kind {
+	case "request", "request_after_auth", "response", "stream_chunk":
+	default:
+		return false
+	}
+	return o.CapturePolicy == CapturePolicy && p.Count >= 2 && p.Count <= MaxBodyParts && p.Index >= 0 && p.Index < p.Count && p.Offset == p.Index*MaxBody && p.TotalBytes > (p.Count-1)*MaxBody && p.TotalBytes <= p.Count*MaxBody && len(o.Body) == min(MaxBody, p.TotalBytes-p.Offset) && sha256Hex.MatchString(p.TotalSHA256)
+}
+
 func (o Observation) Identity() string {
 	raw, _ := json.Marshal([]any{o.Destination, o.Instance, o.Boot, o.RequestID, o.Sequence, o.Kind})
 	return Digest(raw)
@@ -217,6 +242,9 @@ func (o Observation) Identity() string {
 func (o Observation) Validate() error {
 	if o.SchemaVersion != 1 || !identifier.MatchString(o.Destination) || !identifier.MatchString(o.Instance) || !identifier.MatchString(o.Boot) || !identifier.MatchString(o.RequestID) || o.Sequence == 0 || !AllowedRoute(o.Route) || len(o.Body) > MaxBody || o.ContentBytes != len(o.Body) || o.ContentSHA256 != Digest(o.Body) {
 		return errors.New("invalid observation")
+	}
+	if o.BodyPart != nil && !o.BodyPart.valid(o) {
+		return errors.New("invalid body part")
 	}
 	if o.CapturePolicy == CapturePolicy && o.Kind == "stream_chunk" && o.BodyFraming != "stock_hook_block" {
 		return errors.New("content block provenance required")

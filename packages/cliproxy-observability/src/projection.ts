@@ -1,19 +1,65 @@
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 import type { CliproxyObservability } from "./client.js";
 import { resolveCallBlob, type PrivateCaptureStorage } from "./content/index.js";
-import { sha256, type CaptureObservationV1 } from "./capture/index.js";
-import { applyObservation, type ProjectionCheckpoint } from "./protocols/checkpoint.js";
+import { decodeBody, sha256, type CaptureObservationV1 } from "./capture/index.js";
+import {
+  MAX_PROJECTED_SPLIT_BYTES,
+  applyObservation,
+  type ProjectionCheckpoint,
+} from "./protocols/checkpoint.js";
+import { BodyPartAssembler } from "./protocols/body-parts.js";
 import type { ModelCallV1 } from "./model-call/index.js";
+type ProjectionContext = Pick<GenericActionCtx<GenericDataModel>, "runQuery" | "runMutation">;
+type ProjectionOptions = {
+  client: CliproxyObservability;
+  storage: PrivateCaptureStorage;
+  destinationId: string;
+  callId: string;
+};
+const segmentLines = (content: Uint8Array) =>
+  new TextDecoder("utf-8", { fatal: true }).decode(content).split("\n").filter(Boolean);
+/**
+ * A split body spans several immutable segments and projection pages. Re-read
+ * its owned segments from the first part and return the exact verified body.
+ */
+async function reassembleSplitBody(
+  ctx: ProjectionContext,
+  options: ProjectionOptions,
+  fromSegment: number,
+  final: CaptureObservationV1,
+): Promise<Uint8Array> {
+  const parts = new BodyPartAssembler();
+  const first = final.sequence - final.bodyPart!.index;
+  let after = fromSegment - 1;
+  while (after < final.sequence) {
+    const page = await ctx.runQuery(options.client.component.queries.pageEventSegments, {
+      destinationId: options.destinationId,
+      callId: options.callId,
+      afterSequence: after,
+      limit: 8,
+    });
+    if (!page.segments.length || page.segments[0]!.sequence !== after + 1)
+      throw new Error("split body segment unavailable");
+    for (const segment of page.segments) {
+      if (segment.sequence > final.sequence) break;
+      const content = await resolveCallBlob(
+        options.storage,
+        [segment.reference],
+        segment.reference,
+      );
+      for (const line of segmentLines(content)) {
+        const o = JSON.parse(line) as CaptureObservationV1;
+        if (o.sequence < first || o.sequence > final.sequence) continue;
+        const whole = await parts.push(o, decodeBody(o));
+        if (whole) return whole;
+      }
+      after = segment.throughSequence;
+    }
+  }
+  throw new Error("split body incomplete");
+}
 /** Project at most two immutable segments. Host schedules the next page when `more` is true. */
-export async function projectPendingSegments(
-  ctx: Pick<GenericActionCtx<GenericDataModel>, "runQuery" | "runMutation">,
-  options: {
-    client: CliproxyObservability;
-    storage: PrivateCaptureStorage;
-    destinationId: string;
-    callId: string;
-  },
-) {
+export async function projectPendingSegments(ctx: ProjectionContext, options: ProjectionOptions) {
   const { client, destinationId, callId } = options;
   const state = await ctx.runQuery(client.component.queries.getProcessingState, {
     destinationId,
@@ -51,11 +97,20 @@ export async function projectPendingSegments(
         [segment.reference],
         segment.reference,
       );
-      for (const line of new TextDecoder("utf-8", { fatal: true })
-        .decode(content)
-        .split("\n")
-        .filter(Boolean))
-        applyObservation(call, checkpoint, JSON.parse(line) as CaptureObservationV1);
+      for (const line of segmentLines(content)) {
+        const o = JSON.parse(line) as CaptureObservationV1;
+        const part = o.bodyPart;
+        if (part?.index === 0) checkpoint.bodyPartSegment = segment.sequence;
+        if (part && part.index === part.count - 1) {
+          if (checkpoint.bodyPartSegment === undefined) throw new Error("split body start missing");
+          const whole =
+            part.totalBytes > MAX_PROJECTED_SPLIT_BYTES
+              ? null
+              : await reassembleSplitBody(ctx, options, checkpoint.bodyPartSegment, o);
+          applyObservation(call, checkpoint, o, whole);
+          delete checkpoint.bodyPartSegment;
+        } else applyObservation(call, checkpoint, o);
+      }
       through = segment.throughSequence;
     }
     if (through === state.projectedThroughSequence)

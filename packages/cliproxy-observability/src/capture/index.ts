@@ -2,6 +2,8 @@ import { expandStockHookBlock } from "../protocols/stock-block.js";
 import type { ExactCorrelation } from "../model-call/index.js";
 export const MAX_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_CONTENT_BYTES = 1024 * 1024;
+/** One split body spans at most the producer's 256 shared data-record slots. */
+export const MAX_BODY_PARTS = 256;
 const id = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/;
 const routes = new Set([
   "GET /v1/models",
@@ -10,6 +12,20 @@ const routes = new Set([
   "POST /v1/responses",
   "POST /v1/chat/completions",
 ]);
+/**
+ * Native 0.2.5 splits a body larger than `MAX_CONTENT_BYTES` into exact ordered
+ * parts with consecutive sequences. Every part but the last holds exactly
+ * `MAX_CONTENT_BYTES`; `offset` is `index * MAX_CONTENT_BYTES`. Concatenate in
+ * index order and verify `totalBytes`/`totalSha256` (see `/protocols`
+ * `BodyPartAssembler`). A split stream callback is one stock callback.
+ */
+export type BodyPartV1 = {
+  index: number;
+  count: number;
+  offset: number;
+  totalBytes: number;
+  totalSha256: string;
+};
 export type CaptureObservationV1 = {
   schemaVersion: 1;
   pluginVersion: string;
@@ -49,6 +65,7 @@ export type CaptureObservationV1 = {
   bodyFraming?:
     "stock_json_chunk" | "stock_sse_candidate" | "stock_hook_chunk" | "stock_hook_block";
   stockHookChunkLengths?: number[];
+  bodyPart?: BodyPartV1;
   lostContentBytes?: number;
   captureIncomplete?: boolean;
   contentSha256: string;
@@ -141,6 +158,7 @@ export async function validateObservation(
     "correlationConflicts",
     "stockChunkIndex",
     "stockHookChunkLengths",
+    "bodyPart",
     "lostContentBytes",
     "captureIncomplete",
     "body",
@@ -300,6 +318,7 @@ export async function validateObservation(
   )
     throw new Error("invalid body framing");
   const body = decodeBody(o);
+  if (o.bodyPart !== undefined) validateBodyPart(o, body);
   if (o.bodyFraming === "stock_hook_block") {
     if (o.capturePolicy !== "hook-content-block-v1" || o.kind !== "stream_chunk")
       throw new Error("stock block policy required");
@@ -352,6 +371,53 @@ export async function validateObservation(
     callId: await callIdentity(o),
     digest: await sha256(raw),
   };
+}
+
+const partKinds = new Set(["request", "request_after_auth", "response", "stream_chunk"]);
+function validateBodyPart(o: CaptureObservationV1, body: Uint8Array) {
+  const part: unknown = o.bodyPart;
+  const keys = ["index", "count", "offset", "totalBytes", "totalSha256"];
+  if (
+    !part ||
+    typeof part !== "object" ||
+    Array.isArray(part) ||
+    Object.keys(part).length !== keys.length ||
+    !keys.every((key) => key in part)
+  )
+    throw new Error("invalid body part");
+  const { index, count, offset, totalBytes, totalSha256 } = part as BodyPartV1;
+  if (
+    o.capturePolicy !== "hook-content-block-v1" ||
+    !partKinds.has(o.kind) ||
+    ![index, count, offset, totalBytes].every(Number.isSafeInteger) ||
+    count < 2 ||
+    count > MAX_BODY_PARTS ||
+    index < 0 ||
+    index >= count ||
+    offset !== index * MAX_CONTENT_BYTES ||
+    totalBytes <= (count - 1) * MAX_CONTENT_BYTES ||
+    totalBytes > count * MAX_CONTENT_BYTES ||
+    body.byteLength !== Math.min(MAX_CONTENT_BYTES, totalBytes - offset) ||
+    typeof totalSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(totalSha256)
+  )
+    throw new Error("invalid body part");
+}
+type PartPosition = Pick<CaptureObservationV1, "kind" | "sequence" | "bodyPart">;
+/** True when `next` is the part that must follow `previous` in one split body. */
+export function continuesBodyPart(previous: PartPosition, next: PartPosition) {
+  const a = previous.bodyPart;
+  const b = next.bodyPart;
+  return (
+    !!a &&
+    !!b &&
+    next.kind === previous.kind &&
+    next.sequence === previous.sequence + 1 &&
+    b.index === a.index + 1 &&
+    b.count === a.count &&
+    b.totalBytes === a.totalBytes &&
+    b.totalSha256 === a.totalSha256
+  );
 }
 
 /** One immutable NDJSON segment batches observations: no per-token Convex writes. */
@@ -424,6 +490,14 @@ export async function validateSegment(
     )
   )
     throw new Error("inconsistent segment lifecycle");
+  // Parts of one split body are consecutive; neighbors within a segment must chain.
+  for (const [index, o] of observations.entries()) {
+    const previous = observations[index - 1];
+    if (!previous) continue;
+    const open = previous.bodyPart && previous.bodyPart.index < previous.bodyPart.count - 1;
+    if ((open || (o.bodyPart && o.bodyPart.index > 0)) && !continuesBodyPart(previous, o))
+      throw new Error("body part order mismatch");
+  }
   const callId = await callIdentity(first);
   const identity = await sha256(
     new TextEncoder().encode(

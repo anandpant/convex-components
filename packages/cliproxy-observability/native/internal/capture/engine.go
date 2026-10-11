@@ -45,9 +45,18 @@ type scopeState struct {
 	trace, format, model string
 }
 type queued struct {
-	o    Observation
-	size int
+	o     Observation
+	parts []Observation
+	size  int
 }
+
+func (q queued) records() []Observation {
+	if q.parts != nil {
+		return q.parts
+	}
+	return []Observation{q.o}
+}
+
 type capturePipe struct {
 	items        atomic.Int64
 	controlItems atomic.Int64
@@ -114,14 +123,12 @@ func (e *Engine) Observe(method string, raw []byte) {
 	if kind == "" {
 		return
 	}
-	// Stock host already pays clone/RPC cost. Bound our own retained state and decode.
-	if len(raw) > MaxFrame {
-		e.RecordGap(method)
-		return
-	}
+	// Stock frames can carry duplicate base64 request copies (OriginalRequest,
+	// RequestBody, history) at any size. Hook never decodes them: bound the
+	// retained fields, never the frame the host has already allocated.
 	var h Hook
 	if json.Unmarshal(raw, &h) != nil || !identifier.MatchString(h.RequestID) {
-		e.RecordGap(method)
+		e.recordUnreadable(kind, h, raw)
 		return
 	}
 	if len(h.RequestedModel) > 256 {
@@ -166,15 +173,8 @@ func (e *Engine) Observe(method string, raw []byte) {
 		if kind == "response" && route != "GET /v1/models" {
 			return
 		}
-		if len(e.scopes) >= e.config.MaxActive {
-			e.content.unknownLoss.Add(1)
-			e.dropped.Add(1)
-			return
-		}
-		pipe := e.pipes[b.Destination]
-		if !e.reserveBytes(pipe, scopeMetadataCharge, false) {
-			e.dropped.Add(1)
-			e.content.unknownLoss.Add(1)
+		if len(e.scopes) >= e.config.MaxActive || !e.reserveBytes(e.pipes[b.Destination], scopeMetadataCharge, false) {
+			e.missCall(h)
 			return
 		}
 		s = &scopeState{scopeCharge: scopeMetadataCharge, binding: b, route: route, start: now, last: now, correlation: map[string]string{}, trace: h.TraceID, format: h.SourceFormat, model: h.RequestedModel}
@@ -207,8 +207,13 @@ func (e *Engine) Observe(method string, raw []byte) {
 		e.content.streamCallbacks.Add(1)
 		e.content.observed.Add(uint64(len(body)))
 		if len(body) > MaxBody {
-			e.markIncomplete(s, uint64(len(body)))
-			e.emitStreamGap(s, h.RequestID, now, "observation_body_limit", len(body))
+			// One stock callback stays one logical block: exact ordered parts.
+			e.flushStream(s)
+			o := e.allocateObservation(s, h.RequestID, "stream_chunk", now)
+			o.BodyFraming = "stock_hook_block"
+			o.ChunkIndex = &h.ChunkIndex
+			o.ObservedBodyBytes = len(body)
+			e.enqueueParts(s, o, body)
 			return
 		}
 		e.appendStream(s, h.RequestID, body, h.ChunkIndex, now)
@@ -252,14 +257,17 @@ func (e *Engine) Observe(method string, raw []byte) {
 	if kind == "response" {
 		o.StatusCode = h.StatusCode
 	}
-	if kind == "request" || kind == "request_after_auth" || kind == "response" || kind == "stream_chunk" {
-		if len(h.Body) > 0 && json.Unmarshal(h.Body, &o.Body) != nil {
+	var split []byte
+	if kind == "request" || kind == "request_after_auth" || kind == "response" {
+		var body []byte
+		if len(h.Body) > 0 && json.Unmarshal(h.Body, &body) != nil {
 			o.Gap = "invalid_body_encoding"
 		}
-		o.ObservedBodyBytes = len(o.Body)
-		if len(o.Body) > MaxBody {
-			o.Body = nil
-			o.Gap = "observation_body_limit"
+		o.ObservedBodyBytes = len(body)
+		if len(body) > MaxBody {
+			split = body
+		} else {
+			o.Body = body
 		}
 	}
 	excludeCredentialMetadata(&o, e.config.Bindings)
@@ -268,8 +276,8 @@ func (e *Engine) Observe(method string, raw []byte) {
 		e.content.unknownLoss.Add(1)
 		e.markIncomplete(s, 0)
 	}
-	if o.ObservedBodyBytes > len(o.Body) || o.ObservedErrorBytes > len(o.Error) {
-		e.markIncomplete(s, uint64(o.ObservedBodyBytes-len(o.Body)+o.ObservedErrorBytes-len(o.Error)))
+	if o.ObservedErrorBytes > len(o.Error) {
+		e.markIncomplete(s, uint64(o.ObservedErrorBytes-len(o.Error)))
 	}
 	if s.captureLost {
 		if o.Gap == "" {
@@ -279,7 +287,11 @@ func (e *Engine) Observe(method string, raw []byte) {
 		o.LostContentBytes = s.lostBytes
 	}
 
-	e.enqueueObservation(s, o, 0)
+	if split != nil {
+		e.enqueueParts(s, o, split)
+	} else {
+		e.enqueueObservation(s, o, 0)
+	}
 	if kind == "completion" {
 		delete(e.scopes, h.RequestID)
 		e.releaseBytes(e.pipes[s.binding.Destination], s.scopeCharge)
@@ -298,76 +310,125 @@ func (e *Engine) worker(ctx context.Context, pipe *capturePipe) {
 		case <-ctx.Done():
 			return
 		case q := <-pipe.queue:
-
-			o := q.o
-			o.DroppedObservations = e.dropped.Load()
-			o.ScopeConflicts = e.conflicts.Load()
-			o.ContentBytes = len(o.Body)
-			o.ContentSHA256 = Digest(o.Body)
-			raw, err := json.Marshal(o)
-			if err != nil || len(raw) > MaxFrame {
-				e.dropped.Add(1)
-				e.releaseBytes(pipe, q.size)
+			records := q.records()
+			for i, o := range records {
+				if !e.deliver(ctx, client, o) {
+					// Never sent parts of an unfinished split body are lost, not unconfirmed.
+					e.content.unconfirmed.Add(contentBytes(records[i : i+1]))
+					e.content.lost.Add(contentBytes(records[i+1:]))
+					e.releaseBytes(pipe, q.size)
+					pipe.items.Add(-int64(len(records) - i))
+					e.queuedItems.Add(-int64(len(records) - i))
+					return
+				}
 				pipe.items.Add(-1)
 				e.queuedItems.Add(-1)
-
-				e.content.lost.Add(uint64(len(o.Body) + len(o.Error)))
-
-				continue
 			}
-			// Retain the same serialized identity until a durable ACK. No inference goroutine waits here.
-			for {
-				start := time.Now()
-				req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/events", bytes.NewReader(raw))
-				req.Header.Set("Content-Type", "application/json")
-				res, err := client.Do(req)
-				status := 0
-				accepted := false
-				if err == nil {
-					status = res.StatusCode
-					var ack struct{ Identity, Digest string }
-					body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
-					res.Body.Close()
-					accepted = res.StatusCode == 200 && json.Unmarshal(body, &ack) == nil && ack.Identity == o.Identity() && ack.Digest == Digest(raw)
-				}
-				e.admission.record(start, status, accepted)
-				if accepted {
-					break
-				}
-				select {
-				case <-ctx.Done():
-					e.content.unconfirmed.Add(uint64(len(o.Body) + len(o.Error)))
-					e.releaseBytes(pipe, q.size)
-					pipe.items.Add(-1)
-					e.queuedItems.Add(-1)
-
-					return
-				case <-time.After(250 * time.Millisecond):
-				}
-			}
-			e.content.committed.Add(uint64(len(o.Body) + len(o.Error)))
+			// Split parts share one buffer; it stays charged until the last part's ACK.
 			e.releaseBytes(pipe, q.size)
-			pipe.items.Add(-1)
-			e.queuedItems.Add(-1)
-
 		}
 	}
 }
 
-// An oversized/unreadable RPC cannot be attributed safely. Mark active calls
-// incomplete rather than claiming their later terminal proves complete content.
-func (e *Engine) RecordGap(method string) {
-	if hookKind(method) == "" {
-		return
+// deliver retains one serialized identity until its durable ACK. It returns
+// false only on shutdown; a record that cannot be serialized is counted lost.
+func (e *Engine) deliver(ctx context.Context, client *http.Client, o Observation) bool {
+	o.DroppedObservations = e.dropped.Load()
+	o.ScopeConflicts = e.conflicts.Load()
+	o.ContentBytes = len(o.Body)
+	o.ContentSHA256 = Digest(o.Body)
+	raw, err := json.Marshal(o)
+	if err != nil || len(raw) > MaxFrame {
+		e.dropped.Add(1)
+		e.content.lost.Add(contentBytes([]Observation{o}))
+		return true
+	}
+	// No inference goroutine waits here.
+	for {
+		start := time.Now()
+		req, _ := http.NewRequestWithContext(ctx, "POST", "http://capture/events", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		res, err := client.Do(req)
+		status := 0
+		accepted := false
+		if err == nil {
+			status = res.StatusCode
+			var ack struct{ Identity, Digest string }
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+			res.Body.Close()
+			accepted = res.StatusCode == 200 && json.Unmarshal(body, &ack) == nil && ack.Identity == o.Identity() && ack.Digest == Digest(raw)
+		}
+		e.admission.record(start, status, accepted)
+		if accepted {
+			e.content.committed.Add(contentBytes([]Observation{o}))
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+var requestIDKey = []byte(`"RequestID":"`)
+
+// An unreadable callback marks only the call it names. Without a recoverable
+// RequestID it is an unknown loss; unrelated active calls are never marked.
+func (e *Engine) recordUnreadable(kind string, h Hook, raw []byte) {
+	request := h.RequestID
+	if !identifier.MatchString(request) {
+		// Invalid JSON can still name its call. An unescaped key quote is structural.
+		request = ""
+		if i := bytes.Index(raw, requestIDKey); i >= 0 {
+			rest := raw[i+len(requestIDKey):]
+			if end := bytes.IndexByte(rest, '"'); end > 0 && identifier.Match(rest[:end]) {
+				request = string(rest[:end])
+			}
+		}
+	}
+	// A type error leaves decodable fields set; their body bytes are known loss.
+	var body []byte
+	if len(h.Body) > 0 && json.Unmarshal(h.Body, &body) != nil {
+		body = nil
 	}
 	e.dropped.Add(1)
 	e.content.unknownLoss.Add(1)
+	e.content.observed.Add(uint64(len(body)))
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for request, s := range e.scopes {
-		e.markIncomplete(s, 0)
-		e.emitStreamGap(s, request, time.Now(), "unattributed_rpc_gap", 0)
+	s := e.scopes[request]
+	if s == nil || e.closing {
+		e.content.lost.Add(uint64(len(body)))
+		if kind == "request" && s == nil {
+			e.content.missedCalls.Add(1)
+		}
+		return
 	}
+	e.markIncomplete(s, uint64(len(body)))
+	e.emitStreamGap(s, request, time.Now(), "unreadable_callback", len(body))
+}
+
+// missCall records an enrolled call that could not start a scope. Its later
+// callbacks have no scope; the request body is the call's known lost content.
+func (e *Engine) missCall(h Hook) {
+	var body []byte
+	if len(h.Body) > 0 && json.Unmarshal(h.Body, &body) != nil {
+		body = nil
+	}
+	e.dropped.Add(1)
+	e.content.unknownLoss.Add(1)
+	e.content.missedCalls.Add(1)
+	e.content.observed.Add(uint64(len(body)))
+	e.content.lost.Add(uint64(len(body)))
+}
+
+func contentBytes(records []Observation) uint64 {
+	n := 0
+	for _, o := range records {
+		n += len(o.Body) + len(o.Error)
+	}
+	return uint64(n)
 }
 
 func hookKind(method string) string {

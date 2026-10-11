@@ -144,3 +144,4 @@ export function projectCapturedPayloads(args: {
 }
 
 export { expandStockHookBlock } from "./stock-block.js";
+export { BodyPartAssembler, stockHookPieces } from "./body-parts.js";

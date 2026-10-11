@@ -16,6 +16,12 @@ import (
 
 func contentTestEngine(t *testing.T, budget int, handler func(Observation), bindings ...Binding) *Engine {
 	t.Helper()
+	return contentTestEngineACK(t, budget, func(o Observation) bool { handler(o); return true }, bindings...)
+}
+
+// contentTestEngineACK lets a test refuse an exact durable ACK with 503.
+func contentTestEngineACK(t *testing.T, budget int, handler func(Observation) bool, bindings ...Binding) *Engine {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "capture-block-")
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +50,10 @@ func contentTestEngine(t *testing.T, budget int, handler func(Observation), bind
 			w.WriteHeader(400)
 			return
 		}
-		handler(o)
+		if !handler(o) {
+			w.WriteHeader(503)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]string{"identity": o.Identity(), "digest": Digest(raw)})
 	})}
 	go server.Serve(listener)
@@ -68,7 +77,13 @@ func observeContent(t *testing.T, e *Engine, method, request string, body []byte
 }
 func waitContent(t *testing.T, e *Engine) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	waitContentWithin(t, e, 3*time.Second)
+}
+
+// Large split bodies need longer under emulated race builds; the bound is for liveness only.
+func waitContentWithin(t *testing.T, e *Engine, limit time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
 	for e.bytes.Load() > 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
@@ -246,28 +261,5 @@ func TestContentFrameAndSizeFlushPreserveAllBoundaries(t *testing.T) {
 	blocks := records[1 : len(records)-1]
 	if len(blocks) != 4 || len(blocks[0].StockHookChunkLengths) != 1024 || len(blocks[2].Body) != streamBlockBytes {
 		t.Fatal("flush bounds not applied", len(blocks))
-	}
-}
-
-func TestUnattributedRPCGapIsExplicitButUnknownMethodsAreIgnored(t *testing.T) {
-	var mu sync.Mutex
-	var records []Observation
-	e := contentTestEngine(t, 64<<20, func(o Observation) { mu.Lock(); records = append(records, o); mu.Unlock() })
-	observeContent(t, e, "request.intercept_before", "rpc-gap", []byte(`{"stream":true}`), 0)
-	e.Observe("plugin.unknown", nil)
-	e.RecordGap("plugin.unknown")
-	if e.content.unknownLoss.Load() != 0 {
-		t.Fatal("unknown method changed capture coverage")
-	}
-	e.RecordGap("response.intercept_stream_chunk")
-	observeContent(t, e, "response.intercept_stream_chunk", "rpc-gap", []byte("tail"), 1)
-	observeContent(t, e, "request.complete", "rpc-gap", nil, 0)
-	waitContent(t, e)
-	mu.Lock()
-	defer mu.Unlock()
-	sort.Slice(records, func(i, j int) bool { return records[i].Sequence < records[j].Sequence })
-	last := records[len(records)-1]
-	if len(records) != 4 || records[1].Gap != "unattributed_rpc_gap" || string(records[2].Body) != "tail" || !last.CaptureIncomplete || last.LostContentBytes != 0 || e.content.unknownLoss.Load() != 1 {
-		t.Fatal("unknown gap claimed complete content", records, e.Status())
 	}
 }

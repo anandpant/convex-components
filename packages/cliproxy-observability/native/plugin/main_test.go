@@ -13,11 +13,11 @@ func TestStockSchema6Registration(t *testing.T) {
 	t.Setenv("CLIPROXY_CAPTURE_CONFIG", path)
 	defer cliproxyPluginShutdown()
 	for _, schema := range []string{`{"schema_version":5}`, `{"schema_version":7}`} {
-		if _, ok := dispatch("plugin.register", []byte(schema), false); ok {
+		if _, ok := dispatch("plugin.register", []byte(schema)); ok {
 			t.Fatal("unsupported schema accepted")
 		}
 	}
-	v, ok := dispatch("plugin.register", []byte(`{"schema_version":6}`), false)
+	v, ok := dispatch("plugin.register", []byte(`{"schema_version":6}`))
 	if !ok {
 		t.Fatal("registration failed")
 	}
@@ -40,7 +40,7 @@ func TestStockSchema6Registration(t *testing.T) {
 }
 func TestCallbacksNeverRewriteInference(t *testing.T) {
 	for _, method := range []string{"request.intercept_before", "request.intercept_after", "response.intercept_after", "response.intercept_stream_chunk", "request.complete"} {
-		v, ok := dispatch(method, nil, false)
+		v, ok := dispatch(method, nil)
 		if !ok {
 			t.Fatal(method)
 		}

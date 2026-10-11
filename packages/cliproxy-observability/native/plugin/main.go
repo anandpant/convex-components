@@ -71,11 +71,12 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, n C.size_t, response
 	}
 	name := C.GoString(method)
 	var raw []byte
-	// Larger payloads pass unchanged; the observation gap is counted without copying the RPC buffer.
-	if n <= capture.MaxFrame && request != nil {
-		raw = C.GoBytes(unsafe.Pointer(request), C.int(n))
+	// A view of the host buffer, valid only for this call. Decoding copies every
+	// retained field, so no observation aliases host memory after return.
+	if request != nil && n > 0 {
+		raw = unsafe.Slice((*byte)(unsafe.Pointer(request)), int(n))
 	}
-	result, ok := dispatch(name, raw, n > capture.MaxFrame)
+	result, ok := dispatch(name, raw)
 	envelope := map[string]any{"ok": ok, "result": result}
 	if !ok {
 		envelope = map[string]any{"ok": false, "error": map[string]string{"code": "capture_configuration", "message": "capture disabled: invalid private configuration or incompatible schema"}}
@@ -88,7 +89,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, n C.size_t, response
 	}
 	return 0
 }
-func dispatch(method string, raw []byte, oversized bool) (any, bool) {
+func dispatch(method string, raw []byte) (any, bool) {
 	switch method {
 	case "plugin.register", "plugin.reconfigure":
 		var req struct {
@@ -118,11 +119,7 @@ func dispatch(method string, raw []byte, oversized bool) (any, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if engine != nil {
-		if oversized {
-			engine.RecordGap(method)
-		} else {
-			engine.Observe(method, raw)
-		}
+		engine.Observe(method, raw)
 	}
 	// Every request clears authority, including excluded requests; all body/status/credential fields pass through.
 	if method == "request.intercept_before" || method == "request.intercept_after" {

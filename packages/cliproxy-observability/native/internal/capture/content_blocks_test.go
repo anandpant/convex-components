@@ -77,7 +77,13 @@ func observeContent(t *testing.T, e *Engine, method, request string, body []byte
 }
 func waitContent(t *testing.T, e *Engine) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	waitContentWithin(t, e, 3*time.Second)
+}
+
+// Large split bodies need longer under emulated race builds; the bound is for liveness only.
+func waitContentWithin(t *testing.T, e *Engine, limit time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
 	for e.bytes.Load() > 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}

@@ -90,7 +90,7 @@ func captureHookBodies(t *testing.T, request, afterAuth string, callbacks []stri
 	}
 	observe("request.complete", "")
 	var observations []Observation
-	timeout := time.NewTimer(5 * time.Second)
+	timeout := time.NewTimer(30 * time.Second)
 	defer timeout.Stop()
 	for {
 		select {

@@ -85,7 +85,11 @@ func TestTwelveMegabyteRequestAndAfterAuthFitWhileWriterHeld(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	e := contentTestEngine(t, 64<<20, func(o Observation) {
 		if o.Kind == "request" && o.RequestID == "small" {
-			entered <- struct{}{}
+			// A held ACK outlasting the writer's 2 s timeout is retried; every retry waits here.
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
 			<-gate
 		}
 		mu.Lock()
@@ -109,7 +113,7 @@ func TestTwelveMegabyteRequestAndAfterAuthFitWhileWriterHeld(t *testing.T) {
 	close(gate)
 	observeContent(t, e, "request.complete", "small", nil, 0)
 	observeContent(t, e, "request.complete", "large", nil, 0)
-	waitContent(t, e)
+	waitContentWithin(t, e, time.Minute)
 	mu.Lock()
 	defer mu.Unlock()
 	var large []Observation
@@ -175,7 +179,7 @@ func TestLargeHookFramesAreReadWithoutCollateralGaps(t *testing.T) {
 	observeContent(t, e, "response.intercept_stream_chunk", "neighbor", []byte("data: ok\n\n"), 0)
 	observeContent(t, e, "request.complete", "long", nil, 0)
 	observeContent(t, e, "request.complete", "neighbor", nil, 0)
-	waitContent(t, e)
+	waitContentWithin(t, e, time.Minute)
 	mu.Lock()
 	defer mu.Unlock()
 	var long []Observation
@@ -337,7 +341,7 @@ func TestSplitBodiesDeliverThroughUnchangedSegmentBounds(t *testing.T) {
 	observeHook(t, e, "response.intercept_after", hook, bytes.Repeat([]byte("R"), 2*MaxBody+1))
 	hook.Outcome = "succeeded"
 	observeHook(t, e, "request.complete", hook, nil)
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		n := len(delivered)

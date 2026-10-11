@@ -19,6 +19,7 @@ import {
   type CaptureObservationV1,
 } from "../src/capture/index.js";
 import { validContentHealth } from "../src/capture/content-health.js";
+import { MAX_PROJECTED_SPLIT_BYTES } from "../src/protocols/checkpoint.js";
 import { BodyPartAssembler, stockHookPieces } from "../src/protocols/index.js";
 
 const encoder = new TextEncoder();
@@ -359,3 +360,55 @@ it("rejects a split body interrupted across segment boundaries", async () => {
   expect(call?.projectedThroughSequence).toBe(0);
   expect(call?.projectionFailure?.reason).toBe("projection_processing_failed");
 }, 60_000);
+
+it("keeps split bodies over the projection bound raw-complete without allocating them", async () => {
+  const s = setup();
+  const over = MAX_PROJECTED_SPLIT_BYTES + 1;
+  const request = (await split("request", 1, new Uint8Array(over).fill(0x20))).map((o) => ({
+    ...o,
+    requestId: "big-request",
+  }));
+  const event = encoder.encode("event: response.completed");
+  const terminal = encoder.encode(
+    "data: " +
+      JSON.stringify({
+        type: "response.completed",
+        response: { object: "response", id: "r", status: "completed", output: [], usage: {} },
+      }),
+  );
+  const block = await record("stream_chunk", 10, Uint8Array.from([...event, ...terminal]), {
+    requestId: "big-request",
+    stockHookChunkLengths: [event.length, terminal.length],
+  });
+  const done = await record("completion", 11, new Uint8Array(), { requestId: "big-request" });
+  for (const observations of [
+    ...request.slice(0, -1).map((o) => [o]),
+    [request.at(-1)!, block, done],
+  ])
+    expect((await s.post(await segment(observations))).status).toBe(200);
+  const projected = await project(s, await callIdentity(request[0]!));
+  expect(projected).toMatchObject({
+    state: "succeeded",
+    streamed: true,
+    capture: { raw: "complete", projection: "complete" },
+  });
+  expect(projected.capture.projectionIssue).toBeUndefined();
+
+  const plain = await record("request", 1, encoder.encode('{"stream":false}'), {
+    requestId: "big-response",
+  });
+  const response = (await split("response", 2, new Uint8Array(over).fill(0x20))).map((o) => ({
+    ...o,
+    requestId: "big-response",
+  }));
+  const end = await record("completion", 11, new Uint8Array(), { requestId: "big-response" });
+  for (const observations of [
+    [plain],
+    ...response.slice(0, -1).map((o) => [o]),
+    [response.at(-1)!, end],
+  ])
+    expect((await s.post(await segment(observations))).status).toBe(200);
+  expect(await project(s, await callIdentity(plain))).toMatchObject({
+    capture: { raw: "complete", projectionIssue: "frame_limit" },
+  });
+}, 120_000);

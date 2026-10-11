@@ -191,14 +191,21 @@ function observeProtocol(
   }
 }
 /**
+ * Split bodies up to this size are reassembled for scalar projection. Larger ones
+ * stay complete in raw segments; projection does not allocate them in a 64 MiB
+ * Convex action.
+ */
+export const MAX_PROJECTED_SPLIT_BYTES = 8 * 1024 * 1024;
+/**
  * Earlier parts of a split body only advance the sequence. The final part needs
- * the exact reassembled body (`BodyPartAssembler`), passed as `assembled`.
+ * the exact reassembled body (`BodyPartAssembler`) as `assembled`, or `null` when
+ * the body exceeds `MAX_PROJECTED_SPLIT_BYTES` and its semantics are not projected.
  */
 export function applyObservation(
   call: ModelCallV1,
   state: ProjectionCheckpoint,
   o: CaptureObservationV1,
-  assembled?: Uint8Array,
+  assembled?: Uint8Array | null,
 ): void {
   if (o.sequence !== call.capture.projectedThroughSequence + 1)
     throw new Error("projection sequence gap");
@@ -226,7 +233,12 @@ export function applyObservation(
     : undefined;
   if (part && !deferred && assembled === undefined)
     throw new Error("split body requires reassembly");
-  const body = deferred ? new Uint8Array() : (assembled ?? decodeBody(o));
+  const unprojected = part !== undefined && !deferred && assembled === null;
+  if (unprojected && part.totalBytes <= MAX_PROJECTED_SPLIT_BYTES)
+    throw new Error("split body within projection bound");
+  // Like an over-limit SSE frame: content is retained, its semantics are not decoded.
+  if (unprojected && o.kind !== "request") state.invalid = state.frameLimit = true;
+  const body = deferred || unprojected ? new Uint8Array() : (assembled ?? decodeBody(o));
   const decoder = new TextDecoder("utf-8", { fatal: true });
   // A new after-auth event replaces the selection, including unknown fields.
   // Stream initialization may omit auth; an explicit selection replaces the pair.
@@ -249,7 +261,7 @@ export function applyObservation(
     call.correlationConflicts = o.correlationConflicts ?? [];
     call.traceId = o.correlation?.traceId;
     call.sourceTraceId = o.sourceTraceId;
-    if (!deferred) {
+    if (!deferred && !unprojected) {
       try {
         const input = parseObject(decoder.decode(body));
         state.streamed = input.stream === true;
@@ -259,6 +271,11 @@ export function applyObservation(
       }
     }
   }
+  // An unparsed request (e.g. a split body over the projection bound) takes
+  // streaming from the protocol evidence that follows it.
+  if (call.streamed === undefined && (o.kind === "stream_init" || o.kind === "stream_chunk"))
+    call.streamed = true;
+  else if (call.streamed === undefined && o.kind === "response") call.streamed = false;
   // Derived read fields: reads fill them only for summaries projected before 0.3.0.
   Object.assign(call, providerIdentity(call), { costProvenance: call.cost.kind });
   if (o.kind === "response" || o.kind === "stream_chunk" || o.kind === "completion") {

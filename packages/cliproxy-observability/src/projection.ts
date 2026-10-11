@@ -2,7 +2,11 @@ import type { GenericActionCtx, GenericDataModel } from "convex/server";
 import type { CliproxyObservability } from "./client.js";
 import { resolveCallBlob, type PrivateCaptureStorage } from "./content/index.js";
 import { decodeBody, sha256, type CaptureObservationV1 } from "./capture/index.js";
-import { applyObservation, type ProjectionCheckpoint } from "./protocols/checkpoint.js";
+import {
+  MAX_PROJECTED_SPLIT_BYTES,
+  applyObservation,
+  type ProjectionCheckpoint,
+} from "./protocols/checkpoint.js";
 import { BodyPartAssembler } from "./protocols/body-parts.js";
 import type { ModelCallV1 } from "./model-call/index.js";
 type ProjectionContext = Pick<GenericActionCtx<GenericDataModel>, "runQuery" | "runMutation">;
@@ -99,7 +103,10 @@ export async function projectPendingSegments(ctx: ProjectionContext, options: Pr
         if (part?.index === 0) checkpoint.bodyPartSegment = segment.sequence;
         if (part && part.index === part.count - 1) {
           if (checkpoint.bodyPartSegment === undefined) throw new Error("split body start missing");
-          const whole = await reassembleSplitBody(ctx, options, checkpoint.bodyPartSegment, o);
+          const whole =
+            part.totalBytes > MAX_PROJECTED_SPLIT_BYTES
+              ? null
+              : await reassembleSplitBody(ctx, options, checkpoint.bodyPartSegment, o);
           applyObservation(call, checkpoint, o, whole);
           delete checkpoint.bodyPartSegment;
         } else applyObservation(call, checkpoint, o);

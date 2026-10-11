@@ -10,9 +10,9 @@ type ComponentQuery<Registered, Name extends string | undefined> =
     : never;
 
 type PublicQueries<Module, Name extends string | undefined> = {
-  [Key in keyof Module as Module[Key] extends RegisteredQuery<"public", any, any>
-    ? Key
-    : never]: ComponentQuery<Module[Key], Name>;
+  [
+    Key in keyof Module as Module[Key] extends RegisteredQuery<"public", any, any> ? Key : never
+  ]: ComponentQuery<Module[Key], Name>;
 };
 
 type ComponentMutation<Registered, Name extends string | undefined> =
@@ -21,9 +21,9 @@ type ComponentMutation<Registered, Name extends string | undefined> =
     : never;
 
 type PublicMutations<Module, Name extends string | undefined> = {
-  [Key in keyof Module as Module[Key] extends RegisteredMutation<"public", any, any>
-    ? Key
-    : never]: ComponentMutation<Module[Key], Name>;
+  [
+    Key in keyof Module as Module[Key] extends RegisteredMutation<"public", any, any> ? Key : never
+  ]: ComponentMutation<Module[Key], Name>;
 };
 
 export type ComponentApi<Name extends string | undefined = string | undefined> = {

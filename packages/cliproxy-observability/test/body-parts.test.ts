@@ -342,3 +342,20 @@ it("projects a split non-stream response and keeps a split stream frame exact", 
     capture: { raw: "complete", projectionIssue: "frame_limit" },
   });
 });
+
+it("rejects a split body interrupted across segment boundaries", async () => {
+  const s = setup();
+  const parts = await split("request", 1, requestBody);
+  const response = await record("response", 2, encoder.encode("{}"));
+  const completion = await record("completion", 3, new Uint8Array());
+  // Each segment is internally valid; only the projection sees the interruption.
+  for (const observations of [[parts[0]!], [response], [completion]])
+    expect((await s.post(await segment(observations))).status).toBe(200);
+  const callId = await callIdentity(parts[0]!);
+  await expect(projectPendingSegments(s.ctx, { ...s.options, callId })).rejects.toThrow(
+    "body part interrupted",
+  );
+  const call = await s.backend.query(api.queries.getCall, { destinationId: "dev", callId });
+  expect(call?.projectedThroughSequence).toBe(0);
+  expect(call?.projectionFailure?.reason).toBe("projection_processing_failed");
+});

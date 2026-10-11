@@ -403,8 +403,9 @@ function validateBodyPart(o: CaptureObservationV1, body: Uint8Array) {
   )
     throw new Error("invalid body part");
 }
+type PartPosition = Pick<CaptureObservationV1, "kind" | "sequence" | "bodyPart">;
 /** True when `next` is the part that must follow `previous` in one split body. */
-export function continuesBodyPart(previous: CaptureObservationV1, next: CaptureObservationV1) {
+export function continuesBodyPart(previous: PartPosition, next: PartPosition) {
   const a = previous.bodyPart;
   const b = next.bodyPart;
   return (

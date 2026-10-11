@@ -7,7 +7,7 @@ import {
   type PrivateContentReference,
 } from "../model-call/index.js";
 import type { CaptureObservationV1 } from "../capture/index.js";
-import { decodeBody } from "../capture/index.js";
+import { continuesBodyPart, decodeBody } from "../capture/index.js";
 import { assembleResponsesStream } from "./responses.js";
 import { SSEReader, type SSECheckpoint } from "./framing.js";
 import { count, list, nanoTime, object, parseObject } from "./values.js";
@@ -30,6 +30,8 @@ export type ProjectionCheckpoint = {
   chatFinished?: boolean;
   /** First segment of an unfinished split body; projection reassembles from there. */
   bodyPartSegment?: number;
+  /** Last part of an unfinished split body; the next observation must continue it. */
+  openBodyPart?: Pick<CaptureObservationV1, "kind" | "sequence" | "bodyPart">;
 };
 const usageFields = [
   "input_tokens",
@@ -212,7 +214,16 @@ export function applyObservation(
       call.capture.gaps.push(o.gap.slice(0, 128));
   }
   const part = o.bodyPart;
+  // Segments validate only their own neighbors; continuity across them is checked here.
+  if (
+    (state.openBodyPart || (part && part.index > 0)) &&
+    !(state.openBodyPart && continuesBodyPart(state.openBodyPart, o))
+  )
+    throw new Error("body part interrupted");
   const deferred = part !== undefined && part.index < part.count - 1;
+  state.openBodyPart = deferred
+    ? { kind: o.kind, sequence: o.sequence, bodyPart: part }
+    : undefined;
   if (part && !deferred && assembled === undefined)
     throw new Error("split body requires reassembly");
   const body = deferred ? new Uint8Array() : (assembled ?? decodeBody(o));

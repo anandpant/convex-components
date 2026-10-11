@@ -20,6 +20,18 @@ known lost bytes, so the omitted `lostContentBytes` in the third line means zero
 known byte loss, not complete capture. Never assemble complete tool arguments
 across a gap. `completionOutcome` describes the provider only when observed.
 
+`body-part-v1.ndjson` contains the two exact native 0.2.5 `request` records of one
+streamed `/v1/responses` call whose 1,100,069-byte client body exceeds the 1 MiB
+record bound. They came through official stock 8.0.23 (SHA-256
+`085c1bd627c952f2c8db9b5af60bf4aeb1772c3fb102a241bf5ab7662d47f727`) with simulated
+provider playback in CT101's private release qualification. The first record holds
+exactly 1,048,576 body bytes and the second the remaining 51,493; both carry the same
+`bodyPart` manifest (`count: 2`, `totalBytes: 1100069`, `totalSha256`). Feed them in
+order to `/protocols`' `BodyPartAssembler`, which verifies order, offsets, length and
+the whole-body digest and returns the client's exact JSON body. Plugin SHA-256:
+`e5ec8b5e181a68e9f9bb7dbaab86bd66317b92fd30cee0110480e8b90af724fb`. Exporter SHA-256:
+`3b85a2c36e8b59279975165431e78abd2514c335f343833929a04d0662d2fd47`. Synthetic content.
+
 `real/` contains plugin-produced, sanitized observations from six harmless dev protocol variants and one real cancellation on September 23, 2026 UTC. The isolated official CLIProxy 7.3.5
 ARM64 process used the existing private Meshix dev gateway as its configured
 OpenAI-compatible upstream. The existing gateway retained ownership of OAuth

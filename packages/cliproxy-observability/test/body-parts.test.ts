@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from "convex-test";
+import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import schema from "../src/component/schema.js";
 import { api } from "../src/component/_generated/api.js";
@@ -20,7 +21,11 @@ import {
 } from "../src/capture/index.js";
 import { validContentHealth } from "../src/capture/content-health.js";
 import { MAX_PROJECTED_SPLIT_BYTES } from "../src/protocols/checkpoint.js";
-import { BodyPartAssembler, stockHookPieces } from "../src/protocols/index.js";
+import {
+  BodyPartAssembler,
+  projectCapturedPayloads,
+  stockHookPieces,
+} from "../src/protocols/index.js";
 
 const encoder = new TextEncoder();
 const token = "test-capture-token-at-least-24-characters";
@@ -412,3 +417,28 @@ it("keeps split bodies over the projection bound raw-complete without allocating
     capture: { raw: "complete", projectionIssue: "frame_limit" },
   });
 }, 120_000);
+
+it("reassembles the exact native 0.2.5 multipart request fixture through stock 8.0.23", async () => {
+  const lines = readFileSync(new URL("../fixtures/body-part-v1.ndjson", import.meta.url), "utf8")
+    .trim()
+    .split("\n");
+  expect(lines).toHaveLength(2);
+  const assembler = new BodyPartAssembler();
+  let whole: Uint8Array | undefined;
+  for (const line of lines) {
+    const o = JSON.parse(line) as CaptureObservationV1;
+    expect(o).toMatchObject({ pluginVersion: "0.2.5", kind: "request" });
+    const validated = await validateObservation(encoder.encode(line), {
+      destinationId: o.destinationId,
+      instanceIds: [o.instanceId],
+    });
+    whole = await assembler.push(validated.observation, validated.body);
+  }
+  // The proof client sent Python json.dumps of a 1,100,000-character input.
+  const sent = encoder.encode(
+    `{"model": "proof-model", "stream": true, "input": "Say CAPTURE_OK. ${"x".repeat(1_100_000)}"}`,
+  );
+  expect(whole).toEqual(sent);
+  const projected = projectCapturedPayloads({ route: "POST /v1/responses", request: whole });
+  expect(projected).toMatchObject({ requestState: "decoded", scalars: { streamed: true } });
+}, 60_000);

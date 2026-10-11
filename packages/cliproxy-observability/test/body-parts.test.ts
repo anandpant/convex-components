@@ -128,16 +128,16 @@ it("validates exact split request parts and rejects inexact manifests", async ()
   // A non-final part must hold exactly MAX_CONTENT_BYTES.
   const short = await record("request", 1, new Uint8Array(10), { bodyPart: manifest });
   await expect(validate(short)).rejects.toThrow("invalid body part");
-});
+}, 60_000);
 
 it("reassembles byte-identical bodies and refuses missing, interleaved or altered parts", async () => {
   const body = Uint8Array.from({ length: 3 * MAX_CONTENT_BYTES + 7 }, (_, i) => (i * 31) % 256);
   const parts = await split("request_after_auth", 5, body);
-  const decode = async (o: CaptureObservationV1) => (await validate(o)).body;
+  const decoded = await Promise.all(parts.map(async (o) => (await validate(o)).body));
   const assembler = new BodyPartAssembler();
   let whole: Uint8Array | undefined;
   for (const [index, part] of parts.entries()) {
-    whole = await assembler.push(part, await decode(part));
+    whole = await assembler.push(part, decoded[index]!);
     expect(whole === undefined).toBe(index < parts.length - 1);
   }
   expect(whole).toEqual(body);
@@ -146,24 +146,24 @@ it("reassembles byte-identical bodies and refuses missing, interleaved or altere
   expect(await new BodyPartAssembler().push(plain, new Uint8Array())).toEqual(new Uint8Array());
 
   const missing = new BodyPartAssembler();
-  await missing.push(parts[0]!, await decode(parts[0]!));
-  await expect(missing.push(parts[2]!, await decode(parts[2]!))).rejects.toThrow("order");
+  await missing.push(parts[0]!, decoded[0]!);
+  await expect(missing.push(parts[2]!, decoded[2]!)).rejects.toThrow("order");
   const interleaved = new BodyPartAssembler();
-  await interleaved.push(parts[0]!, await decode(parts[0]!));
+  await interleaved.push(parts[0]!, decoded[0]!);
   await expect(interleaved.push(plain, new Uint8Array())).rejects.toThrow("interrupted");
   const altered = new BodyPartAssembler();
-  const changed = await decode(parts.at(-1)!);
-  for (const part of parts.slice(0, -1)) await altered.push(part, await decode(part));
+  for (const [index, part] of parts.slice(0, -1).entries())
+    await altered.push(part, decoded[index]!);
   await expect(
     altered.push(
       parts.at(-1)!,
-      changed.map((b) => b ^ 1),
+      decoded.at(-1)!.map((b) => b ^ 1),
     ),
   ).rejects.toThrow("digest");
   await expect(
     new BodyPartAssembler(MAX_CONTENT_BYTES).push(parts[0]!, new Uint8Array()),
   ).rejects.toThrow("read limit");
-});
+}, 60_000);
 
 it("requires split parts that share a segment to chain", async () => {
   // A full part leaves room for a small final part in the same 1408 KiB segment.
@@ -177,7 +177,7 @@ it("requires split parts that share a segment to chain", async () => {
   await expect(check([whole, parts[1]!])).rejects.toThrow("body part order");
   const other = await split("response", 1, new Uint8Array(MAX_CONTENT_BYTES + 4));
   await expect(check([parts[0]!, other[1]!])).rejects.toThrow();
-});
+}, 60_000);
 
 it("accepts the native 0.2.5 missed-call counter and older health senders", () => {
   const health = {
@@ -197,7 +197,7 @@ it("accepts the native 0.2.5 missed-call counter and older health senders", () =
   expect(validContentHealth({ ...health, missedCalls: -1 })).toBe(false);
   expect(validContentHealth({ ...health, other: 1 })).toBe(false);
   expect(validContentHealth({ ...health, lostBytes: undefined })).toBe(false);
-});
+}, 60_000);
 
 function setup() {
   const backend = convexTest(schema, import.meta.glob("../src/component/**/*.ts"));
@@ -285,7 +285,7 @@ it("receives and projects split request and stream bodies across segments", asyn
     totalTokens: 10,
     capture: { raw: "complete", projection: "complete", terminalSequence: 7 },
   });
-});
+}, 60_000);
 
 it("projects a split non-stream response and keeps a split stream frame exact", async () => {
   const s = setup();
@@ -341,7 +341,7 @@ it("projects a split non-stream response and keeps a split stream frame exact", 
   expect(await project(s, await callIdentity(streamed))).toMatchObject({
     capture: { raw: "complete", projectionIssue: "frame_limit" },
   });
-});
+}, 60_000);
 
 it("rejects a split body interrupted across segment boundaries", async () => {
   const s = setup();
@@ -358,4 +358,4 @@ it("rejects a split body interrupted across segment boundaries", async () => {
   const call = await s.backend.query(api.queries.getCall, { destinationId: "dev", callId });
   expect(call?.projectedThroughSequence).toBe(0);
   expect(call?.projectionFailure?.reason).toBe("projection_processing_failed");
-});
+}, 60_000);

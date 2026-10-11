@@ -25,8 +25,8 @@ func captureHookBodies(t *testing.T, request, afterAuth string, callbacks []stri
 	defer os.RemoveAll(dir)
 	c := testConfig()
 	c.Socket = filepath.Join(dir, "capture.sock")
-	c.QueueBytes = 8 << 20
-	delivered := make(chan Observation, len(callbacks)+3)
+	c.QueueBytes = 64 << 20
+	delivered := make(chan Observation, len(callbacks)+64)
 	listener, err := net.Listen("unix", c.Socket)
 	if err != nil {
 		t.Fatal(err)
@@ -149,12 +149,27 @@ func TestHookRetainsEverySplitAndMalformedBytes(t *testing.T) {
 
 }
 
-func TestHookBodyLimitRemainsExplicit(t *testing.T) {
-	callbacks := []string{strings.Repeat("x", MaxBody), strings.Repeat("y", MaxBody+1)}
-	observations := captureHookBodies(t, `{"stream":true}`, "", callbacks)
-	if string(observations[1].Body) != callbacks[0] || len(observations[2].Body) != 0 || observations[2].ObservedBodyBytes != MaxBody+1 || observations[2].Gap != "observation_body_limit" {
-		t.Fatal("body bounds or loss evidence changed")
+func TestOversizedCallbacksSplitWithoutLoss(t *testing.T) {
+	request := `{"stream":true,"input":"` + strings.Repeat("r", 2*MaxBody) + `"}`
+	after := `{"model":"executed-model","input":"` + strings.Repeat("a", 2*MaxBody+77) + `"}`
+	callbacks := []string{"event: response.created", strings.Repeat("x", MaxBody), strings.Repeat("y", 3*MaxBody+5), "tail"}
+	observations := captureHookBodies(t, request, after, callbacks)
+	bodies := joinParts(t, observations)
+	if len(bodies) < 4 || bodies[0].kind != "request" || string(bodies[0].body) != request || bodies[1].kind != "request_after_auth" || string(bodies[1].body) != after || observations[len(observations)-1].Kind != "completion" {
+		t.Fatal("split request bodies changed")
 	}
+	for _, o := range observations {
+		if o.Gap != "" || o.CaptureIncomplete || len(o.Body) > MaxBody {
+			t.Fatal("split capture recorded loss or exceeded the body bound", o.Sequence)
+		}
+	}
+	var streams []Observation
+	for _, o := range observations {
+		if o.Kind == "stream_chunk" {
+			streams = append(streams, o)
+		}
+	}
+	assertHookChunks(t, streams, callbacks)
 }
 
 func TestCredentialMetadataOmissionPreservesContent(t *testing.T) {
@@ -188,12 +203,29 @@ func TestCompletionDiagnosticFidelityAndBound(t *testing.T) {
 func assertHookChunks(t *testing.T, observations []Observation, callbacks []string) {
 	t.Helper()
 	index := 0
+	var split []byte
 	for _, o := range observations {
 		if o.BodyFraming != "stock_hook_block" || o.ChunkIndex == nil || *o.ChunkIndex != index || o.ObservedBodyBytes != len(o.Body) || o.Gap != "" || o.CapturePolicy != CapturePolicy {
 			t.Fatalf("block %d changed: %+v", index, o)
 		}
 		if err := o.Validate(); err != nil {
 			t.Fatal(err)
+		}
+		// One oversized stock callback is one logical block split into parts.
+		if p := o.BodyPart; p != nil {
+			if p.Offset != len(split) {
+				t.Fatalf("callback %d part out of order", index)
+			}
+			split = append(split, o.Body...)
+			if p.Index < p.Count-1 {
+				continue
+			}
+			if Digest(split) != p.TotalSHA256 || index >= len(callbacks) || string(split) != callbacks[index] {
+				t.Fatalf("split callback %d changed", index)
+			}
+			split = nil
+			index++
+			continue
 		}
 		offset := 0
 		for _, n := range o.StockHookChunkLengths {

@@ -23,6 +23,7 @@ type ContentHealth struct {
 	LostBytes            uint64 `json:"lostBytes"`
 	UnconfirmedBytes     uint64 `json:"unconfirmedBytes"`
 	UnknownLosses        uint64 `json:"unknownLosses"`
+	MissedCalls          uint64 `json:"missedCalls"`
 	StreamCallbacks      uint64 `json:"streamCallbacks"`
 	IncompleteCalls      uint64 `json:"incompleteCalls"`
 	CapacityRejections   uint64 `json:"capacityRejections"`
@@ -32,11 +33,12 @@ type ContentHealth struct {
 type contentCounters struct {
 	observed, committed, lost, unconfirmed, unknownLoss atomic.Uint64
 	streamCallbacks, incomplete, capacityRejections     atomic.Uint64
+	missedCalls                                         atomic.Uint64
 	peak                                                atomic.Int64
 }
 
 func (c *contentCounters) snapshot(retained int64) *ContentHealth {
-	return &ContentHealth{c.observed.Load(), c.committed.Load(), c.lost.Load(), c.unconfirmed.Load(), c.unknownLoss.Load(), c.streamCallbacks.Load(), c.incomplete.Load(), c.capacityRejections.Load(), retained, max(retained, c.peak.Load())}
+	return &ContentHealth{ObservedBytes: c.observed.Load(), CommittedBytes: c.committed.Load(), LostBytes: c.lost.Load(), UnconfirmedBytes: c.unconfirmed.Load(), UnknownLosses: c.unknownLoss.Load(), MissedCalls: c.missedCalls.Load(), StreamCallbacks: c.streamCallbacks.Load(), IncompleteCalls: c.incomplete.Load(), CapacityRejections: c.capacityRejections.Load(), RetainedChargedBytes: retained, PeakChargedBytes: max(retained, c.peak.Load())}
 }
 
 // Include all retained representations. Base64/JSON and HTTP serialization
@@ -302,10 +304,11 @@ func (e *Engine) closeContent() {
 		for _, pipe := range e.pipes {
 			for len(pipe.queue) > 0 {
 				q := <-pipe.queue
-				e.content.lost.Add(uint64(len(q.o.Body) + len(q.o.Error)))
+				records := q.records()
+				e.content.lost.Add(contentBytes(records))
 				e.releaseBytes(pipe, q.size)
-				pipe.items.Add(-1)
-				e.queuedItems.Add(-1)
+				pipe.items.Add(-int64(len(records)))
+				e.queuedItems.Add(-int64(len(records)))
 			}
 			for len(pipe.control) > 0 {
 				q := <-pipe.control

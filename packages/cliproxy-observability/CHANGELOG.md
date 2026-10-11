@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.7
+
+- Native 0.2.5 stores request, after-auth, non-stream response bodies and single stream callbacks larger than 1 MiB as exact ordered parts instead of dropping them. Parts use consecutive sequences; each record carries `bodyPart: { index, count, offset, totalBytes, totalSha256 }`, every part but the last holds exactly 1 MiB, and readers verify the whole-body digest. Record body, envelope (2 MiB), segment (1408 KiB), sequence/ACK, FULL/WAL and retention bounds are unchanged.
+- The receiver validates split parts alongside unchanged historical records. `/protocols` exports `BodyPartAssembler` for exact reassembly and `stockHookPieces` for block or split-callback replay; package projection reassembles split bodies from owned segments before decoding them.
+- Native 0.2.5 no longer rejects stock hook callbacks by whole-frame size. Stock header-init frames carry two undecoded base64 request copies; only retained fields are bounded. An unreadable callback marks only the call it names (`unreadable_callback`); without a recoverable request ID it is an unknown loss and never marks unrelated active calls.
+- A split body is admitted all-or-nothing against the unchanged byte pool and 256 shared record slots. Parts share one buffer, so the item is charged that buffer once, 16 KiB per part, and 3 MiB serialization headroom for the one part its writer holds. A rejected body records its exact known loss at one sequence.
+- Content health adds optional `missedCalls`: enrolled calls that could not start a capture scope, with their known request bytes counted lost. Older health senders remain accepted.
+- Deploy receiver 0.3.7 and split-aware readers before native 0.2.5. Readers that do not reassemble parts see partial JSON per record and must not treat them as complete content.
+
 ## 0.3.6
 
 - Preserve streamed content in bounded, byte-identical stock hook blocks rather than one durable record per callback. The shared `expandStockHookBlock` helper restores parser boundaries for receiver projection and selected-call readers.

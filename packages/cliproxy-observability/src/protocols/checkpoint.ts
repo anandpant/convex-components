@@ -1,4 +1,4 @@
-import { expandStockHookBlock } from "./stock-block.js";
+import { stockHookPieces } from "./body-parts.js";
 import {
   providerIdentity,
   TOKEN_FIELDS,
@@ -28,6 +28,8 @@ export type ProjectionCheckpoint = {
   streamed?: boolean;
   inputSeen?: boolean;
   chatFinished?: boolean;
+  /** First segment of an unfinished split body; projection reassembles from there. */
+  bodyPartSegment?: number;
 };
 const usageFields = [
   "input_tokens",
@@ -186,10 +188,15 @@ function observeProtocol(
     }
   }
 }
+/**
+ * Earlier parts of a split body only advance the sequence. The final part needs
+ * the exact reassembled body (`BodyPartAssembler`), passed as `assembled`.
+ */
 export function applyObservation(
   call: ModelCallV1,
   state: ProjectionCheckpoint,
   o: CaptureObservationV1,
+  assembled?: Uint8Array,
 ): void {
   if (o.sequence !== call.capture.projectedThroughSequence + 1)
     throw new Error("projection sequence gap");
@@ -204,7 +211,11 @@ export function applyObservation(
     if (!call.capture.gaps.includes(o.gap) && call.capture.gaps.length < 8)
       call.capture.gaps.push(o.gap.slice(0, 128));
   }
-  const body = decodeBody(o);
+  const part = o.bodyPart;
+  const deferred = part !== undefined && part.index < part.count - 1;
+  if (part && !deferred && assembled === undefined)
+    throw new Error("split body requires reassembly");
+  const body = deferred ? new Uint8Array() : (assembled ?? decodeBody(o));
   const decoder = new TextDecoder("utf-8", { fatal: true });
   // A new after-auth event replaces the selection, including unknown fields.
   // Stream initialization may omit auth; an explicit selection replaces the pair.
@@ -227,12 +238,14 @@ export function applyObservation(
     call.correlationConflicts = o.correlationConflicts ?? [];
     call.traceId = o.correlation?.traceId;
     call.sourceTraceId = o.sourceTraceId;
-    try {
-      const input = parseObject(decoder.decode(body));
-      state.streamed = input.stream === true;
-      call.streamed = state.streamed;
-    } catch {
-      state.invalid = true;
+    if (!deferred) {
+      try {
+        const input = parseObject(decoder.decode(body));
+        state.streamed = input.stream === true;
+        call.streamed = state.streamed;
+      } catch {
+        state.invalid = true;
+      }
     }
   }
   // Derived read fields: reads fill them only for summaries projected before 0.3.0.
@@ -251,10 +264,7 @@ export function applyObservation(
       }
       if ((o.kind === "stream_chunk" || o.kind === "completion") && body.length) {
         const reader = new SSEReader(state.sse);
-        const pieces =
-          o.bodyFraming === "stock_hook_block"
-            ? expandStockHookBlock(body, o.stockHookChunkLengths ?? [])
-            : [body];
+        const pieces = o.bodyFraming === "stock_hook_block" ? stockHookPieces(o, body) : [body];
         const frames = pieces.flatMap((piece) =>
           o.bodyFraming === "stock_hook_chunk" || o.bodyFraming === "stock_hook_block"
             ? reader.feedStock(piece, call.clientProtocol, o.observedAt)

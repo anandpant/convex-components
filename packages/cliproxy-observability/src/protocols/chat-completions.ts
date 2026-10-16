@@ -11,15 +11,15 @@ export function assembleChatStream(events: RecordValue[], done: boolean, stockCo
   const tools = new Map<number, Map<number, RecordValue>>();
   for (const event of events) {
     if (Array.isArray(event.choices) || event.error) recognized = true;
-    for (const key of ["id", "model", "object"])
+    else unsupported = true;
+    for (const key of ["id", "model", "object", "created", "service_tier", "system_fingerprint"])
       if (event[key] !== undefined) response[key] = event[key];
     if (event.usage !== undefined && event.usage !== null) response.usage = event.usage;
     // Final usage is emitted on an empty choices chunk or with finished choices.
     // A later [DONE] marker cannot turn an earlier running count into final usage.
-    if (Array.isArray(event.choices))
+    if (Array.isArray(event.choices) && (event.choices.length > 0 || event.usage != null))
       terminalUsage =
-        event.usage !== undefined &&
-        event.usage !== null &&
+        event.usage != null &&
         event.choices.every((choice) => typeof object(choice).finish_reason === "string");
     if (event.error) {
       response.error = event.error;
@@ -35,6 +35,15 @@ export function assembleChatStream(events: RecordValue[], done: boolean, stockCo
       const saved = choices.get(index) ?? { index, message: { role: "assistant" } };
       const message = object(saved.message);
       const delta = object(choice.delta);
+      if (typeof delta.role === "string") message.role = delta.role;
+      if (choice.logprobs !== undefined && choice.logprobs !== null) {
+        const logprobs = object(saved.logprobs);
+        for (const key of ["content", "refusal"]) {
+          const tokens = object(choice.logprobs)[key];
+          if (Array.isArray(tokens)) logprobs[key] = [...list(logprobs[key]), ...tokens];
+        }
+        saved.logprobs = logprobs;
+      }
       if (
         Object.keys(delta).some(
           (key) =>

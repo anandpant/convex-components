@@ -776,3 +776,290 @@ it("persists exact content-health counters and accepts previous senders", async 
   }
   expect((await s.post(healthRecord())).status).toBe(200);
 });
+
+it.each([
+  "complete",
+  "bad-metadata",
+  "wrong-response",
+  "unknown-event",
+  "truncated",
+  "canceled",
+  "gap",
+  "lost-bytes",
+  "incomplete",
+] as const)(
+  "projects metadata stream receipts through completion and selected-call replay: %s",
+  async (scenario) => {
+    const { metadata, terminal, streamBytes } = await import("./fixtures/metadata-stream.js");
+    const { projectCapturedPayloads, stockHookPieces } = await import("../src/protocols/index.js");
+    const { decodeBody } = await import("../src/capture/index.js");
+    const s = setup();
+    const base: CaptureObservationV1 = {
+      schemaVersion: 1,
+      pluginVersion: "fixture",
+      capturePolicy: "hook-content-block-v1",
+      destinationId: s.options.destinationId,
+      instanceId: s.options.instanceIds[0]!,
+      pluginBootId: "fixture-metadata-boot",
+      requestId: "fixture-metadata-request",
+      configRevision: "fixture",
+      sequence: 1,
+      offsetNs: 1,
+      observedAt: "2026-10-01T00:00:00Z",
+      route: "POST /v1/responses",
+      kind: "request",
+      body: "",
+      contentBytes: 0,
+      contentSha256: await sha256(new Uint8Array()),
+    };
+    const observation = async (
+      sequence: number,
+      kind: CaptureObservationV1["kind"],
+      body: Uint8Array,
+      extra: Partial<CaptureObservationV1> = {},
+    ): Promise<CaptureObservationV1> => ({
+      ...base,
+      sequence,
+      offsetNs: sequence,
+      kind,
+      body: Buffer.from(body).toString("base64"),
+      contentBytes: body.length,
+      contentSha256: await sha256(body),
+      ...(kind === "stream_chunk"
+        ? { bodyFraming: "stock_hook_block" as const, stockHookChunkLengths: [body.length] }
+        : {}),
+      ...extra,
+    });
+    const control =
+      scenario === "bad-metadata"
+        ? { ...metadata, metadata: null }
+        : scenario === "wrong-response"
+          ? { ...metadata, response_id: "unrelated-response" }
+          : scenario === "unknown-event"
+            ? { type: "response.future" }
+            : metadata;
+    const body = streamBytes([control]);
+    const ending =
+      scenario === "canceled"
+        ? new Uint8Array()
+        : scenario === "truncated"
+          ? Buffer.concat([streamBytes([terminal]), Buffer.from("data: {")])
+          : streamBytes([terminal]);
+    const observations = [
+      await observation(1, "request", encode.encode('{"stream":true}')),
+      // Frame state must survive persisted projection checkpoints.
+      await observation(2, "stream_chunk", body.subarray(0, 17)),
+      await observation(3, "stream_chunk", body.subarray(17)),
+      await observation(4, "stream_chunk", ending),
+      await observation(5, "completion", new Uint8Array(), {
+        completionOutcome: scenario === "canceled" ? "canceled" : "succeeded",
+        ...(scenario === "gap" ? { gap: "fixture_loss" } : {}),
+        ...(scenario === "lost-bytes"
+          ? { lostContentBytes: 1, captureIncomplete: true, gap: "fixture_loss" }
+          : {}),
+        ...(scenario === "incomplete"
+          ? { captureIncomplete: true, gap: "fixture_incomplete" }
+          : {}),
+      }),
+    ];
+    const callId = await callIdentity(base);
+    const args = { destinationId: base.destinationId, callId };
+    for (const o of observations) {
+      const receipt = await s.post(await envelope([o]));
+      expect(receipt.status, await receipt.text()).toBe(200);
+      expect(await projectPendingSegments(s.ctx, { ...s.options, callId })).toMatchObject({
+        progressed: true,
+        more: false,
+      });
+      const stored = await s.client.getCall(s.ctx, args);
+      expect(stored!.projectedThroughSequence).toBe(o.sequence);
+      if (o.sequence < 4) expect(JSON.parse(stored!.summaryJson).totalTokens).toBeUndefined();
+    }
+    const stored = await s.client.getCall(s.ctx, args);
+    const call = JSON.parse(stored!.summaryJson) as ModelCallV1;
+    expect(call.cost).toEqual({ kind: "unknown" });
+    expect(call.capture.terminalSequence).toBe(5);
+    expect(call.capture.persistedThroughSequence).toBe(5);
+    if (scenario === "complete") {
+      expect(call).toMatchObject({
+        state: "succeeded",
+        inputTokens: 60,
+        outputTokens: 5,
+        totalTokens: 65,
+        cachedInputTokens: 20,
+        cacheCreationInputTokens: 30,
+        reasoningTokens: 2,
+        capture: { raw: "complete", projection: "complete", usage: "complete" },
+      });
+      expect(call.usage.every((usage) => usage.finality === "final")).toBe(true);
+    } else {
+      expect(call.totalTokens).toBeUndefined();
+      expect(call.usage.every((usage) => usage.finality === "partial")).toBe(true);
+      if (["gap", "lost-bytes", "incomplete"].includes(scenario))
+        expect(call.capture.raw).toBe("partial");
+      if (scenario === "canceled") expect(call.state).toBe("aborted");
+      if (["bad-metadata", "wrong-response"].includes(scenario))
+        expect(call.capture.projectionIssue).toBe("malformed_payload");
+      if (scenario === "unknown-event")
+        expect(call.capture.projectionIssue).toBe("unsupported_protocol");
+      if (scenario === "truncated") expect(call.capture.projectionIssue).toBe("truncated_frame");
+    }
+    // Replay the selected call's actual persisted bytes through the public content API.
+    const page = await s.client.pageEventSegments(s.ctx, { ...args, limit: 8 });
+    const captured: CaptureObservationV1[] = [];
+    for (const segment of page.segments) {
+      const bytes = await resolveCallBlob(s.storage, [segment.reference], segment.reference);
+      captured.push(
+        ...new TextDecoder()
+          .decode(bytes)
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      );
+    }
+    expect(captured).toEqual(observations);
+    const replay = projectCapturedPayloads({
+      route: base.route,
+      request: decodeBody(captured[0]!),
+      complete: true,
+      stockHookChunks: true,
+      chunks: captured
+        .filter((o) => o.kind === "stream_chunk")
+        .flatMap((o) => stockHookPieces(o, decodeBody(o))),
+    });
+    if (scenario === "complete") {
+      expect(replay).toMatchObject({
+        responseState: "decoded",
+        scalars: {
+          inputTokens: 60,
+          outputTokens: 5,
+          totalTokens: 65,
+          cachedInputTokens: 20,
+          cacheCreationInputTokens: 30,
+          reasoningTokens: 2,
+        },
+        metadata: { responseMetadata: [metadata] },
+        output: {
+          completion: "Built.",
+          reasoning: "Checked.",
+          messages: [{}, {}, { tool_calls: [{ function: { arguments: '{"size":2}' } }] }],
+        },
+      });
+    }
+  },
+);
+
+it.each([
+  ["messages", "citation", "complete"],
+  ["messages", "unknown", "unsupported"],
+  ["messages", "malformed", "invalid"],
+  ["chat", "trailer", "complete"],
+  ["chat", "unknown", "unsupported"],
+] as const)(
+  "keeps incremental %s %s diagnostics aligned with replay",
+  async (protocol, scenario, expected) => {
+    const s = setup();
+    const { streamBytes } = await import("./fixtures/metadata-stream.js");
+    const { projectCapturedPayloads } = await import("../src/protocols/index.js");
+    const frames =
+      protocol === "messages"
+        ? [
+            {
+              type: "message_start",
+              message: {
+                type: "message",
+                id: "fixture-message",
+                content: [],
+                usage: { input_tokens: 10, output_tokens: 1 },
+              },
+            },
+            {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "Built." },
+            },
+            scenario === "unknown"
+              ? { type: "future_event" }
+              : {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: {
+                    type: "citations_delta",
+                    citation:
+                      scenario === "malformed"
+                        ? null
+                        : {
+                            type: "char_location",
+                            cited_text: "Fixture",
+                            document_index: 0,
+                            start_char_index: 0,
+                            end_char_index: 7,
+                          },
+                  },
+                },
+            { type: "content_block_stop", index: 0 },
+            {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn" },
+              usage: { output_tokens: 2 },
+            },
+            { type: "message_stop" },
+          ]
+        : [
+            {
+              choices: [
+                {
+                  index: 0,
+                  delta:
+                    scenario === "unknown"
+                      ? { future_content: "not decoded" }
+                      : { content: "Built." },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+            },
+            { choices: [] },
+          ];
+    const route = protocol === "messages" ? "POST /v1/messages" : "POST /v1/chat/completions";
+    // Historical canonical framing exercises the same receiver with no stock repair.
+    const observations: CaptureObservationV1[] = [];
+    const bodies = [
+      encode.encode('{"stream":true}'),
+      ...frames.map((frame) => streamBytes([frame])),
+      new Uint8Array(),
+    ];
+    for (const [index, body] of bodies.entries())
+      observations.push({
+        ...events[0]!,
+        route,
+        requestId: "fixture-protocol-request",
+        sequence: index + 1,
+        kind: index === 0 ? "request" : index === bodies.length - 1 ? "completion" : "stream_chunk",
+        body: Buffer.from(body).toString("base64"),
+        contentBytes: body.length,
+        contentSha256: await sha256(body),
+        ...(index === bodies.length - 1 ? { completionOutcome: "succeeded" } : {}),
+      });
+    const callId = await callIdentity(observations[0]!);
+    for (const o of observations) {
+      const receipt = await s.post(await envelope([o]));
+      expect(receipt.status, await receipt.text()).toBe(200);
+      await projectPendingSegments(s.ctx, { ...s.options, callId });
+    }
+    const stored = await s.client.getCall(s.ctx, {
+      destinationId: s.options.destinationId,
+      callId,
+    });
+    const call = JSON.parse(stored!.summaryJson) as ModelCallV1;
+    const replay = projectCapturedPayloads({
+      route,
+      complete: true,
+      chunks: [streamBytes(frames)],
+    });
+    expect(call.capture.projection).toBe(expected);
+    expect(replay.responseState).toBe(expected === "complete" ? "decoded" : expected);
+    expect(call.outputTokens).toBe(expected === "complete" ? 2 : undefined);
+    expect(replay.scalars.outputTokens).toBe(call.outputTokens);
+  },
+);

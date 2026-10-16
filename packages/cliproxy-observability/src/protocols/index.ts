@@ -10,7 +10,7 @@ export type { SSEFrame, SSECheckpoint } from "./framing.js";
 export type { CliproxyProjection, ProjectionState } from "./types.js";
 export { assembleResponsesStream, assembleChatStream, assembleAnthropicStream };
 export { nanoTime } from "./values.js";
-export const PARSER_VERSION = "client-protocol-v2";
+export const PARSER_VERSION = "client-protocol-v3";
 export function protocolForRoute(route: string): CliproxyProjection["protocol"] {
   if (route === "POST /v1/messages" || route === "POST /v1/messages/count_tokens")
     return "anthropic_messages";
@@ -99,6 +99,12 @@ export function projectCapturedPayloads(args: {
           ? assembleChatStream(events, done, args.complete === true)
           : assembleAnthropicStream(events);
     response = assembled.response;
+    if (
+      "metadataEvents" in assembled &&
+      Array.isArray(assembled.metadataEvents) &&
+      assembled.metadataEvents.length
+    )
+      projection.metadata.responseMetadata = assembled.metadataEvents;
     invalid ||= assembled.invalid;
     projection.responseState = invalid
       ? "invalid"

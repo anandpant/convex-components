@@ -42,12 +42,44 @@ export function anthropicMessages(messages: unknown): RecordValue[] {
           content: block.content,
           is_error: block.is_error,
         });
-      } else if (block.type === "text") content.push({ type: "text", text: block.text });
-      else content.push(block);
+      } else content.push(block);
     }
     flush();
   }
   return result;
+}
+
+/** Event-local validation shared by full replay and bounded scalar checkpoints. */
+export function inspectAnthropicEvent(event: RecordValue) {
+  const type = event.type;
+  let invalid = false;
+  let unsupported = ![
+    "message_start",
+    "message_delta",
+    "message_stop",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "ping",
+    "error",
+  ].includes(String(type));
+  if (String(type).startsWith("content_block_")) invalid = count(event.index) === undefined;
+  if (type === "content_block_delta") {
+    const delta = object(event.delta);
+    unsupported ||= ![
+      "text_delta",
+      "thinking_delta",
+      "signature_delta",
+      "input_json_delta",
+      "citations_delta",
+    ].includes(String(delta.type));
+    if (delta.type === "citations_delta")
+      invalid ||=
+        delta.citation === null ||
+        typeof delta.citation !== "object" ||
+        Array.isArray(delta.citation);
+  }
+  return { invalid, unsupported };
 }
 
 export function assembleAnthropicStream(events: RecordValue[]) {
@@ -60,6 +92,9 @@ export function assembleAnthropicStream(events: RecordValue[]) {
   const blocks = new Map<number, RecordValue>();
   const argumentsByIndex = new Map<number, string>();
   for (const event of events) {
+    const inspected = inspectAnthropicEvent(event);
+    invalid ||= inspected.invalid;
+    unsupported ||= inspected.unsupported;
     const index = count(event.index);
     if (event.type === "message_start") {
       response = { ...object(event.message) };
@@ -74,12 +109,8 @@ export function assembleAnthropicStream(events: RecordValue[]) {
         invalid = true;
         continue;
       }
-      if (
-        !["text_delta", "thinking_delta", "signature_delta", "input_json_delta"].includes(
-          String(delta.type),
-        )
-      )
-        unsupported = true;
+      if (delta.type === "citations_delta" && !inspected.invalid)
+        block.citations = [...list(block.citations), delta.citation];
       for (const key of ["text", "thinking", "signature"]) append(block, key, delta[key]);
       if (typeof delta.partial_json === "string")
         argumentsByIndex.set(index, (argumentsByIndex.get(index) ?? "") + delta.partial_json);

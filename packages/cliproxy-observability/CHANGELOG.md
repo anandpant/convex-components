@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.8
+
+- Recognize the captured Responses `response.metadata` extension, validate its object payload, sequence and response identity, and preserve every envelope in selected-call `metadata.responseMetadata`. Valid metadata no longer withholds the six terminal token scalars. Lifecycle `response.metadata` remains separate in native output.
+- Preserve Chat streaming provider metadata and accumulated logprobs, and keep terminal usage across empty trailers. Preserve Anthropic citation deltas in native and normalized text. Unknown Chat and Messages events/deltas remain diagnostic in both replay and incremental projection.
+- Parser version is `client-protocol-v3`. Receiver summaries already projected with the previous parser require an explicit replay from the first retained segment; updating the package does not rewrite them or clear their sticky diagnostics. Selected-call content replay uses the installed parser.
+- Native capture, storage schema and cost semantics are unchanged. Cost remains unknown when no billed cost is emitted. No native restart is needed for the receiver/parser update.
+
 ## 0.3.7
 
 - Native 0.2.5 stores request, after-auth, non-stream response bodies and single stream callbacks larger than 1 MiB as exact ordered parts instead of dropping them. Parts use consecutive sequences; each record carries `bodyPart: { index, count, offset, totalBytes, totalSha256 }`, every part but the last holds exactly 1 MiB, and readers verify the whole-body digest. Record body, envelope (2 MiB), segment (1408 KiB), sequence/ACK, FULL/WAL and retention bounds are unchanged.

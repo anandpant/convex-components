@@ -8,7 +8,9 @@ import {
 } from "../model-call/index.js";
 import type { CaptureObservationV1 } from "../capture/index.js";
 import { continuesBodyPart, decodeBody } from "../capture/index.js";
-import { assembleResponsesStream } from "./responses.js";
+import { assembleResponsesStream, observeResponsesEnvelope } from "./responses.js";
+import { assembleChatStream } from "./chat-completions.js";
+import { inspectAnthropicEvent } from "./anthropic-messages.js";
 import { SSEReader, type SSECheckpoint } from "./framing.js";
 import { count, list, nanoTime, object, parseObject } from "./values.js";
 import { extractUsage } from "./usage.js";
@@ -28,6 +30,7 @@ export type ProjectionCheckpoint = {
   streamed?: boolean;
   inputSeen?: boolean;
   chatFinished?: boolean;
+  responseId?: string;
   /** First segment of an unfinished split body; projection reassembles from there. */
   bodyPartSegment?: number;
   /** Last part of an unfinished split body; the next observation must continue it. */
@@ -101,7 +104,16 @@ function observeProtocol(
   if (stream && protocol === "responses") {
     // Shared assembler determines whether the event vocabulary is supported; sequence
     // validation belongs to selected-call content replay, not this scalar checkpoint.
+    observeResponsesEnvelope(state, event);
     if (assembleResponsesStream([event]).unsupported) state.unsupported = true;
+  }
+  if (stream && protocol !== "responses") {
+    const inspected =
+      protocol === "chat_completions"
+        ? assembleChatStream([event], false)
+        : inspectAnthropicEvent(event);
+    state.invalid ||= inspected.invalid;
+    state.unsupported ||= inspected.unsupported;
   }
   if (typeof event.model === "string") call.responseModel = event.model.slice(0, 256);
   if (protocol === "responses") {

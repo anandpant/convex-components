@@ -1,10 +1,43 @@
 import type { RecordValue } from "./types.js";
 import { append, count, list, object } from "./values.js";
 
+/** Validate the captured metadata extension without interpreting provider-specific payload keys.
+ * Keep identity bounded because the incremental checkpoint stores it across segments.
+ */
+export function observeResponsesEnvelope(
+  state: { responseId?: string; invalid?: boolean },
+  event: RecordValue,
+) {
+  if (event.type === "keepalive" && count(event.sequence_number) === undefined)
+    state.invalid = true;
+  const metadata = event.type === "response.metadata";
+  if (
+    metadata &&
+    (count(event.sequence_number) === undefined ||
+      event.metadata === null ||
+      typeof event.metadata !== "object" ||
+      Array.isArray(event.metadata))
+  )
+    state.invalid = true;
+  const id = metadata ? event.response_id : object(event.response).id;
+  if (metadata || id !== undefined) {
+    if (
+      typeof id !== "string" ||
+      !id.length ||
+      id.length > 256 ||
+      (state.responseId !== undefined && state.responseId !== id)
+    )
+      state.invalid = true;
+    else state.responseId = id;
+  }
+}
+
 /** Reconstruct only emitted Responses content; a completed item is not a completed call. */
 export function assembleResponsesStream(events: RecordValue[]) {
   const response: RecordValue = {};
   const items = new Map<number, RecordValue>();
+  const envelope: { responseId?: string; invalid?: boolean } = {};
+  const metadataEvents: RecordValue[] = [];
   let terminal = false;
   let terminalUsage = false;
   let terminalSnapshot = false;
@@ -13,6 +46,14 @@ export function assembleResponsesStream(events: RecordValue[]) {
   let unsupported = false;
   for (const event of events) {
     const type = String(event.type);
+    observeResponsesEnvelope(envelope, event);
+    if (type === "response.metadata") {
+      recognized = true;
+      // Preserve every update, including its identity and sequence, separately from
+      // response.metadata in lifecycle snapshots (a distinct provider field).
+      metadataEvents.push(event);
+      continue;
+    }
     if (type === "keepalive") {
       // This control frame carries no response content, identity or final usage.
       recognized = true;
@@ -172,7 +213,15 @@ export function assembleResponsesStream(events: RecordValue[]) {
       ...emitted.filter((item) => typeof item.id !== "string" || !snapshotIds.has(item.id)),
     ];
   }
-  return { response, terminal, terminalUsage, recognized, invalid, unsupported };
+  return {
+    response,
+    terminal,
+    terminalUsage,
+    recognized,
+    invalid: invalid || !!envelope.invalid,
+    unsupported,
+    metadataEvents,
+  };
 }
 
 export function responsesMessages(output: unknown): RecordValue[] {

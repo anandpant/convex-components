@@ -82,6 +82,9 @@ func TestTwelveMegabyteRequestAndAfterAuthFitWhileWriterHeld(t *testing.T) {
 	var mu sync.Mutex
 	var records []Observation
 	gate := make(chan struct{})
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(gate) }) }
+	defer unblock() // Release the handler even if an assertion aborts the test.
 	entered := make(chan struct{}, 1)
 	e := contentTestEngine(t, 64<<20, func(o Observation) {
 		if o.Kind == "request" && o.RequestID == "small" {
@@ -110,7 +113,7 @@ func TestTwelveMegabyteRequestAndAfterAuthFitWhileWriterHeld(t *testing.T) {
 	if stats.CapacityRejections != 0 || stats.IncompleteCalls != 0 || stats.PeakChargedBytes > 64<<20 {
 		t.Fatal("split bodies exceeded the unchanged pool", stats)
 	}
-	close(gate)
+	unblock()
 	observeContent(t, e, "request.complete", "small", nil, 0)
 	observeContent(t, e, "request.complete", "large", nil, 0)
 	waitContentWithin(t, e, time.Minute)

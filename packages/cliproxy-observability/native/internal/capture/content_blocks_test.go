@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,19 +35,36 @@ func contentTestEngineACK(t *testing.T, budget int, handler func(Observation) bo
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewUnstartedServer(contentTestEventsHandler(t.Error, handler))
+	server.Listener.Close()
+	server.Listener = listener
+	server.Start()
+	// httptest.Close joins active handlers; http.Server.Close only closes
+	// their connections and can leave them reporting errors after t completes.
+	t.Cleanup(func() { server.Close(); os.RemoveAll(dir) })
+	e := NewEngine(c)
+	t.Cleanup(e.Close)
+	return e
+}
+
+func contentTestEventsHandler(reportError func(...any), handler func(Observation) bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/events" {
 			w.WriteHeader(200)
 			return
 		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Error(err)
+			// Engine shutdown/timeouts cancel uploads. An incomplete canceled
+			// body is not an invalid observation; unrelated read errors still fail.
+			if r.Context().Err() == nil {
+				reportError(err)
+			}
 			return
 		}
 		var o Observation
 		if json.Unmarshal(raw, &o) != nil || o.Validate() != nil {
-			t.Error("invalid event")
+			reportError("invalid event")
 			w.WriteHeader(400)
 			return
 		}
@@ -55,12 +73,7 @@ func contentTestEngineACK(t *testing.T, budget int, handler func(Observation) bo
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{"identity": o.Identity(), "digest": Digest(raw)})
-	})}
-	go server.Serve(listener)
-	t.Cleanup(func() { server.Close(); os.RemoveAll(dir) })
-	e := NewEngine(c)
-	t.Cleanup(e.Close)
-	return e
+	}
 }
 func observeContent(t *testing.T, e *Engine, method, request string, body []byte, index int) {
 	t.Helper()

@@ -1,6 +1,6 @@
 # Stock CLIProxy capture
 
-Go native capture for official CLIProxyAPI, ABI 1 / RPC schema 6. Release 0.2.0 was built and packaged against 7.3.5; [additional 7.3.15 compatibility](host-compatibility.md) is qualified separately for the unchanged Linux amd64 artifacts. The serving binary is unmodified and hash-verified. TypeScript in the component owns protocol normalization; the plugin scopes and timestamps exact hook-body observations.
+Go native capture for official CLIProxyAPI, ABI 1 / RPC schema 6. Native 0.2.6 accepts host maximum schemas >= 6 and continues to select schema-6 callbacks. Newer host maxima do not opt capture into newer callback formats or capabilities. See [host compatibility](host-compatibility.md) for the policy, source review and qualification limits. The serving binary is unmodified and hash-verified. TypeScript in the component owns protocol normalization; the plugin scopes and timestamps exact hook-body observations.
 
 Live installation requires the separately owned Meshix receiver and my-nix deployment, closure of the device-endpoint bypass, resource preflight and DEV verification before production enrollment.
 
@@ -50,6 +50,8 @@ docker run --rm --cpus 2 --memory 4g cliproxy-capture-proof
 ```
 
 Default/CI playback is simulated and never uses real credentials. It checks all six generation JSON/SSE variants, models/count_tokens, post-hook failure, pre-hook unavailability, exact scope/exclusion, internal-header removal, capture hashes/gaps, restart and exporter outage. Native tests cover crash/ACK replay, wrong receipts, resegmentation, redirects, destination fairness, queue/disk saturation, exact payload fidelity and fragmented stream bytes. Receiver tests cover derived stock framing, usage and explicit projection failures.
+
+The fixture compares full request/after-auth/response bytes, replays stream callback boundaries into exact HTTP framing, checks complete tool arguments and exact failed-request/error content, and verifies final durable loss/unconfirmed/incomplete counters. `CLIPROXY_HARNESS_PROTOCOL_ONLY=1` explicitly skips load and labels the report `protocol_only`; it does not qualify capacity. To test another official stock asset, mount its verified executable at `/stock/cli-proxy-api` and set `CLIPROXY_STOCK_VERSION` to its version. The report records the actual executable hash. The default image and release manifest retain their 7.3.5 baseline.
 
 The fixture puts every nginx temp, PID, lock and log path under its private run root and uses the invoking UID for workers. Its private prefix and early error-log argument prevent compiled defaults from touching another nginx instance. The image build tests config validation, startup, a buffered 64 KiB request, teardown and invalid configuration against external temp directories owned by another UID. Run this root integration test only in a disposable container or private mount/network namespaces with `CLIPROXY_HARNESS_ISOLATED=1`. A network namespace and private `/tmp` alone do not isolate nginx's compiled absolute filesystem paths; CT101 qualification must additionally hide those paths behind private mounts before running the fixture.
 

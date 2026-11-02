@@ -1,5 +1,6 @@
 """Isolated stock binary proof. All provider payloads here are SIMULATED, never real recordings."""
 import concurrent.futures
+import base64
 from contextlib import closing
 from collections import Counter
 import hashlib
@@ -25,29 +26,40 @@ PERSONAL = 'harness-Personal-key-0123456789'
 PREVIEW = 'harness-Preview-key-0123456789'
 DEPLOYMENT = 'https://harness-dev.convex.site'
 provider_headers = []
+content_requests = {}
+TOOL_ARGUMENTS = '{"text":"é token secret https://example.invalid/?x=1&y=2","nested":{"value":"keep"}}'
 class Provider(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def log_message(self, *_): pass
     def do_POST(self):
-        data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        raw = self.rfile.read(int(self.headers['Content-Length']))
+        data = json.loads(raw)
+        tool_proof = 'CAPTURE_TOOL' in json.dumps(data)
         provider_headers.append(dict(self.headers))
         if 'FAIL_CAPTURE' in json.dumps(data):
             body=b'{"error":{"message":"simulated post-hook failure","type":"server_error"}}'
             self.send_response(503);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
         if data.get('stream'):
             body = b''
-            for item in [
+            items = [
                 {'choices':[{'index':0,'delta':{'role':'assistant','content':'CAPTURE_'},'finish_reason':None}]},
                 {'choices':[{'index':0,'delta':{'content':'OK'},'finish_reason':None}]},
-                {'choices':[{'index':0,'delta':{},'finish_reason':'stop'}], 'usage':{'prompt_tokens':7,'completion_tokens':3,'total_tokens':10}}
-            ]:
+            ]
+            if tool_proof: items += [
+                {'choices':[{'index':0,'delta':{'tool_calls':[{'index':0,'id':'call-proof','type':'function','function':{'name':'proof_tool','arguments':TOOL_ARGUMENTS[:30]}}]},'finish_reason':None}]},
+                {'choices':[{'index':0,'delta':{'tool_calls':[{'index':0,'function':{'arguments':TOOL_ARGUMENTS[30:]}}]},'finish_reason':None}]},
+            ]
+            items += [{'choices':[{'index':0,'delta':{},'finish_reason':'stop'}], 'usage':{'prompt_tokens':7,'completion_tokens':3,'total_tokens':10}}]
+            for item in items:
                 item.update(id='chatcmpl-harness', object='chat.completion.chunk', created=1700000000, model='proof-model')
                 body += b'data: ' + json.dumps(item).encode() + b'\n\n'
             body += b'data: [DONE]\n\n'
             self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(body)));self.end_headers()
             for part in body.splitlines(keepends=True): self.wfile.write(part);self.wfile.flush()
         else:
-            body = json.dumps({'id':'chatcmpl-harness','object':'chat.completion','created':1700000000,'model':'proof-model','choices':[{'index':0,'message':{'role':'assistant','content':'CAPTURE_OK'},'finish_reason':'stop'}], 'usage':{'prompt_tokens':7,'completion_tokens':3,'total_tokens':10}}).encode()
+            message={'role':'assistant','content':'CAPTURE_OK'}
+            if tool_proof: message['tool_calls']=[{'id':'call-proof','type':'function','function':{'name':'proof_tool','arguments':TOOL_ARGUMENTS}}]
+            body = json.dumps({'id':'chatcmpl-harness','object':'chat.completion','created':1700000000,'model':'proof-model','choices':[{'index':0,'message':message,'finish_reason':'stop'}], 'usage':{'prompt_tokens':7,'completion_tokens':3,'total_tokens':10}}).encode()
             self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
 
 
@@ -59,15 +71,23 @@ def wait_port(port):
     raise RuntimeError(f'port {port} did not open')
 
 
-def request(path='/v1/chat/completions', *, port=8318, key=DEV, headers=None, stream=False, payload_size=32, failure=False):
+def request(path='/v1/chat/completions', *, port=8318, key=DEV, headers=None, stream=False, payload_size=32, failure=False, proof_id=None):
     h={'Authorization':'Bearer '+key,'X-Meshix-Deployment':DEPLOYMENT,'Content-Type':'application/json'}
     if headers: h.update(headers)
     h={k:v for k,v in h.items() if v is not None}
     data={'model':'proof-model','stream':stream,'messages':[{'role':'user','content':'Say CAPTURE_OK. '+('x'*payload_size)}],'max_tokens':32}
     if path=='/v1/responses': data={'model':'proof-model','stream':stream,'input':'Say CAPTURE_OK. '+('x'*payload_size)}
     if failure: data['messages']=[{'role':'user','content':'FAIL_CAPTURE'}]
+    if proof_id:
+        h['X-Meshix-Request-Id'] = proof_id
+        if not failure:
+            if path=='/v1/responses': data['input']+=' CAPTURE_TOOL'
+            else: data['messages'][0]['content']+=' CAPTURE_TOOL'
+    raw = json.dumps(data).encode()
+    if proof_id:
+        content_requests[proof_id] = raw
     c=http.client.HTTPConnection('127.0.0.1',port,timeout=30)
-    start=time.perf_counter_ns();c.request('GET' if path=='/v1/models' else 'POST',path,json.dumps(data),h);r=c.getresponse();first=r.read(1);ttft=(time.perf_counter_ns()-start)/1e6;body=first+r.read();latency=(time.perf_counter_ns()-start)/1e6;status=r.status;c.close()
+    start=time.perf_counter_ns();c.request('GET' if path=='/v1/models' else 'POST',path,raw,h);r=c.getresponse();first=r.read(1);ttft=(time.perf_counter_ns()-start)/1e6;body=first+r.read();latency=(time.perf_counter_ns()-start)/1e6;status=r.status;c.close()
     return status,body,ttft,latency
 
 
@@ -205,13 +225,16 @@ def percentiles(values):
     return {p:v[min(len(v)-1,round((len(v)-1)*q))] for p,q in [('p50',.5),('p95',.95),('p99',.99)]}
 
 def main():
+    protocol_only=os.environ.get('CLIPROXY_HARNESS_PROTOCOL_ONLY')=='1'
     ROOT.mkdir(mode=0o700);(ROOT/'auth').mkdir();(ROOT/'outbox').mkdir(mode=0o700)
     prepare_nginx_runtime()
     capture_config={'enabled':True,'instanceId':'isolated-stock-proof','revision':'proof-v1','socket':str(ROOT/'outbox/capture.sock'),'bindings':[{'key':DEV,'destinationId':'harness-dev','deployment':DEPLOYMENT,'environment':'dev'},{'key':PROD,'destinationId':'harness-prod','deployment':'https://harness-prod.convex.site','environment':'prod'}]}
     (ROOT/'capture.json').write_text(json.dumps(capture_config));(ROOT/'capture.json').chmod(0o600)
     (ROOT/'nginx.conf').write_text(nginx_config())
     provider=ThreadingHTTPServer(('127.0.0.1',8316),Provider);threading.Thread(target=provider.serve_forever,daemon=True).start()
-    procs=[];report={'fixtureProvenance':'simulated_provider_playback','stockVersion':'7.3.5','stockSHA256':hashlib.sha256(Path('/stock/cli-proxy-api').read_bytes()).hexdigest(),'architecture':platform.machine(),'load':{'concurrency':8,'calls':160,'requestContentBytes':65536}}
+    procs=[];report={'fixtureProvenance':'simulated_provider_playback','stockVersion':os.environ.get('CLIPROXY_STOCK_VERSION','7.3.5'),'stockSHA256':hashlib.sha256(Path('/stock/cli-proxy-api').read_bytes()).hexdigest(),'architecture':platform.machine(),'load':{'concurrency':8,'calls':160,'requestContentBytes':65536}}
+    report['qualificationMode']='protocol_only' if protocol_only else 'protocol_and_load'
+    if protocol_only: report['load']=None
     def start_exporter():
         p=subprocess.Popen(['/capture/cliproxy-capture-exporter','--socket',str(ROOT/'outbox/capture.sock'),'--db',str(ROOT/'outbox/events.db'),'--reserve-bytes','1048576'],stdout=subprocess.DEVNULL,stderr=open(ROOT/'exporter.log','ab'));procs.append(p)
         for _ in range(100):
@@ -233,21 +256,77 @@ def main():
                 provider_headers.clear()
                 stop_proc(stock);stock=start_stock(True)
             for _ in range(5): assert request()[0]==200
+            if protocol_only: continue
             stop=threading.Event();samples={};monitor=threading.Thread(target=peak_rss,args=({'stock':stock.pid,'exporter':exporter.pid},stop,samples));monitor.start()
             start=time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool: results=list(pool.map(lambda _:request(stream=True,payload_size=65536),range(160)))
             elapsed=time.monotonic()-start;stop.set();monitor.join()
             assert all(r[0]==200 and b'CAPTURE_' in r[1] for r in results)
             report['enabled' if enabled else 'baseline']={'ttfbMs':percentiles([r[2] for r in results]),'latencyMs':percentiles([r[3] for r in results]),'callsPerSecond':len(results)/elapsed,'peakRssKiB':samples}
-        base=sum(e['kind']=='completion' for e in wait_events(165))
+        base=sum(e['kind']=='completion' for e in wait_events(5 if protocol_only else 165))
         captures={}
+        content_proof={}
         for route,stream in [(route,stream) for route in ['/v1/messages','/v1/responses','/v1/chat/completions'] for stream in [False,True]]:
-            status,body,_,_=request(route,stream=stream);assert status==200,(route,status,body[:200]);captures[route+('#sse' if stream else '#json')]={'status':status,'downstreamSHA256':hashlib.sha256(body).hexdigest()}
+            proof_id='protocol-'+str(len(captures))
+            status,body,_,_=request(route,stream=stream,proof_id=proof_id);assert status==200,(route,status,body[:200]);captures[route+('#sse' if stream else '#json')]={'status':status,'downstreamSHA256':hashlib.sha256(body).hexdigest()}
+            (ROOT/f'{proof_id}-request.bin').write_bytes(content_requests[proof_id])
+            (ROOT/f'{proof_id}-response.bin').write_bytes(body)
+            content_proof[proof_id]=(stream,body)
         found=wait_events(base+6);before=len(found)
-        for route in captures:
-            output=[e for e in found if e['route']=='POST '+route.split('#')[0] and e['kind'] in ['response','stream_chunk']]
-            assert any(e.get('body') for e in output), f'{route}: body missing'
-            assert not any(e.get('gap') for e in output), f'{route}: incomplete body'
+        report['contentProof']={}
+        for proof_id,(stream,downstream) in content_proof.items():
+            call=[e for e in found if e.get('correlation',{}).get('requestId')==proof_id]
+            assert call and not any(e.get('gap') or e.get('captureIncomplete') or e.get('lostContentBytes',0) for e in call), f'{proof_id}: incomplete capture'
+            def content(kind): return b''.join(base64.b64decode(e.get('body','')) for e in call if e['kind']==kind)
+            assert content('request')==content_requests[proof_id], f'{proof_id}: request bytes differ'
+            # These stock hooks retain the source payload before executor translation.
+            assert content('request_after_auth')==content_requests[proof_id], f'{proof_id}: after-auth bytes differ'
+            output=content('stream_chunk' if stream else 'response')
+            route=call[0]['route']
+            if stream:
+                chunks=[]
+                for e in call:
+                    if e['kind']!='stream_chunk': continue
+                    raw=base64.b64decode(e['body']);lengths=e['stockHookChunkLengths']
+                    assert e['bodyFraming']=='stock_hook_block' and sum(lengths)==len(raw), 'invalid callback boundaries'
+                    offset=0
+                    for n in lengths: chunks.append(raw[offset:offset+n]);offset+=n
+                # Chat hooks contain raw JSON. Stock's HTTP writer adds data:
+                # framing and [DONE]. Messages/Responses hooks already carry SSE.
+                wire=output
+                if route.endswith('/chat/completions'):
+                    wire=b''.join(b'data: '+chunk+b'\n\n' for chunk in chunks if chunk)+b'data: [DONE]\n\n'
+                elif route.endswith('/responses'):
+                    # Older stock hooks omit separators; its HTTP writer adds
+                    # them per callback. Current stock may already include them.
+                    wire=b''
+                    for chunk in chunks:
+                        wire+=chunk
+                        if not chunk.endswith((b'\n\n',b'\r\n\r\n')):
+                            wire+=b'\r\n' if chunk.endswith(b'\r\n') else b'\n' if chunk.endswith(b'\n') else b'\n\n'
+                    wire+=b'\n'  # Stock's final separator is outside the hooks.
+                assert wire==downstream, f'{proof_id}: ordered stream bytes differ'
+            else:
+                assert output==downstream, f'{proof_id}: response bytes differ'
+            assert b'proof_tool' in output, f'{proof_id}: tool name missing'
+            if stream:
+                frames=[json.loads(chunk) for chunk in chunks if chunk] if route.endswith('/chat/completions') else [json.loads(line[5:]) for chunk in chunks for line in chunk.splitlines() if line.startswith(b'data:') and line[5:].strip()!=b'[DONE]']
+                if route.endswith('/messages'):
+                    arguments=''.join(f.get('delta',{}).get('partial_json','') for f in frames if f.get('type')=='content_block_delta')
+                elif route.endswith('/responses'):
+                    arguments=''.join(f.get('delta','') for f in frames if f.get('type')=='response.function_call_arguments.delta')
+                else:
+                    arguments=''.join(tool.get('function',{}).get('arguments','') for f in frames for choice in f.get('choices',[]) for tool in choice.get('delta',{}).get('tool_calls',[]))
+                assert arguments==TOOL_ARGUMENTS, f'{proof_id}: tool argument bytes differ'
+            else:
+                response=json.loads(output)
+                if route.endswith('/messages'):
+                    assert next(b['input'] for b in response['content'] if b['type']=='tool_use')==json.loads(TOOL_ARGUMENTS), f'{proof_id}: tool input differs'
+                elif route.endswith('/responses'):
+                    assert next(b['arguments'] for b in response['output'] if b['type']=='function_call')==TOOL_ARGUMENTS, f'{proof_id}: tool argument bytes differ'
+                else:
+                    assert response['choices'][0]['message']['tool_calls'][0]['function']['arguments']==TOOL_ARGUMENTS, f'{proof_id}: tool argument bytes differ'
+            report['contentProof'][proof_id]={'route':route,'stream':stream,'requestBytes':len(content('request')),'afterAuthBytes':len(content('request_after_auth')),'responseBytes':len(output),'capturedResponseSHA256':hashlib.sha256(output).hexdigest(),'orderedContent':'exact request/after-auth and response bytes; stream callback boundaries restore exact HTTP framing; complete tool arguments verified'}
         # Exclusions must produce no outbox observations; duplicate authority input is overwritten by nginx.
         for kwargs in [dict(key=PERSONAL,headers={'X-Meshix-Capture-Destination':'harness-dev','X-Meshix-Capture-Route':'POST /v1/chat/completions','X-Meshix-Capture-Revision':'proof-v1'}),dict(key=PREVIEW),dict(key=DEV.lower()),dict(port=8319,headers={'X-Meshix-Capture-Destination':'harness-dev','X-Meshix-Capture-Route':'POST /v1/chat/completions','X-Meshix-Capture-Revision':'proof-v1'}),dict(headers={'X-Meshix-Capture-Destination':'harness-prod','X-Meshix-Deployment':'wrong'}),dict(headers={'X-Api-Key':PERSONAL}),dict(headers={'X-Goog-Api-Key':PERSONAL}),dict(headers={'X-Meshix-Deployment':''})]:request(**kwargs)
         duplicate_request()
@@ -278,8 +357,25 @@ def main():
         stop_proc(exporter);start=time.monotonic();assert request()[0]==200;report['collectorUnavailableInferenceMs']=(time.monotonic()-start)*1000
         exporter=start_exporter();wait_events(base+12)
         # Fault injection is last: stock correctly cools down the failing upstream auth.
-        status,_,_,_=request(failure=True);assert status==503,status
+        status,error_body,_,_=request(failure=True,proof_id='error-proof');assert status==503,status
+        (ROOT/'error-response.bin').write_bytes(error_body)
         failed=wait_events(base+13);assert any(e.get('completionOutcome')=='failed' for e in failed),'post-hook failure missing'
+        error_call=[e for e in failed if e.get('correlation',{}).get('requestId')=='error-proof']
+        terminal=next(e for e in error_call if e['kind']=='completion')
+        assert terminal.get('error','').encode()==error_body, 'post-hook error bytes differ'
+        assert b''.join(base64.b64decode(e.get('body','')) for e in error_call if e['kind']=='request')==content_requests['error-proof'], 'failed request content differs'
+        report['errorContentProof']={'downstreamSHA256':hashlib.sha256(error_body).hexdigest(),'capturedDiagnosticSHA256':hashlib.sha256(terminal['error'].encode()).hexdigest(),'failedRequestBytes':len(content_requests['error-proof'])}
+        stop_proc(stock)  # Graceful drain publishes final durable byte accounting.
+        with closing(sqlite3.connect(ROOT/'outbox/events.db')) as db:
+            health=[json.loads(row[0]) for row in db.execute('SELECT payload FROM health')]
+        assert health, 'durable boot health missing'
+        for h in health:
+            assert h['activeCalls']==0 and h['droppedObservationsTotal']==0 and h['lostControlObservationsTotal']==0, 'capture record loss'
+            content=h['content']
+            assert content['observedBytes']>0 and content['observedBytes']==content['committedBytes'], 'uncommitted observed content'
+            assert all(content[k]==0 for k in ['lostBytes','unconfirmedBytes','unknownLosses','missedCalls','incompleteCalls','capacityRejections','retainedChargedBytes']), 'capture content loss or uncertainty'
+        report['finalHealth']=health
+        report['processLossBoundary']='unknown_before_local_commit; graceful drain is not crash-loss proof'
         report['durability']='restart + collector unavailable replay passed';report['scope']='personal/preview/case/conflict/missing deployment/device spoof excluded; gateway overwrite and both carriers passed'
         (ROOT/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))
     finally:

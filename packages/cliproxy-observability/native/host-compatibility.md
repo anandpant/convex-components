@@ -56,11 +56,24 @@ and graceful final loss/unconfirmed/incomplete accounting passed. Published
 native 0.2.5 rejected schema 10 at the C registration entry point while accepting
 6; the candidate accepted both and replied with schema 6.
 
-The unpaced 8-worker/160-call/64-KiB latest-stock load **failed** under local
-amd64 emulation at 2 CPU / 4 GiB, with queue saturation and explicit loss. This
-is not a full-load pass or native x86_64 capacity qualification. Queue/storage
-limits were not changed. Preserve that failed evidence and require separate
-native-host load qualification before activation.
+The unpaced 8-worker/160-call/64-KiB load **failed** under local amd64 emulation
+and parent-operated isolated native AMD64 at 2 CPU / 4 GiB. The matched native
+8.0.33 / native 0.2.5 control also failed (193 drops, 39 lost-control records,
+4,950,802 lost bytes); the candidate failed with two destinations (191/15/
+4,819,488) and one destination (276/0/7,132,364). The global 256-data-record
+ceiling remains unchanged; one destination does not yield 512 slots. All
+terminals in the one-destination run did not make its gapped content complete.
+This class of burst limit predates negotiation; identical production-shaped
+throughput across host versions has not been established.
+
+The coordinator accepted a schema-only compatibility scope with exact-artifact
+protocol/content and bounded operational acceptance, retaining the stress
+failures as a separate capacity limit. The exact pair also passed the parent's
+isolated native AMD64 8.0.51 protocol-only fixture with 16,315 observed=committed
+bytes and zero loss/uncertainty counters. Neither protocol-only nor CI's 7.3.5
+baseline is a latest-stock full-stress pass. Queue/resource/storage/default
+changes require a separate scope. Bounded live capture loss still requires
+rollback regardless of the old control; this document is not activation proof.
 
 Package 0.3.9 carries native 0.2.6. The exporter entry point, all capture/storage/
 delivery code, module dependencies and pinned build image match package 0.3.7

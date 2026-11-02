@@ -7,6 +7,8 @@ import hashlib
 import http.client
 import json
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 import platform
 import pwd
@@ -189,7 +191,74 @@ def nginx_command(*args):
 
 
 def events():
-    with sqlite3.connect(ROOT/'outbox/events.db') as db: return [json.loads(r[0]) for r in db.execute('select payload from events order by destination,instance,boot,request_id,sequence')]
+    with closing(sqlite3.connect(ROOT/'outbox/events.db')) as db: return [json.loads(r[0]) for r in db.execute('select payload from events order by destination,instance,boot,request_id,sequence')]
+
+
+def stop_proc(process):
+    assert process.poll() is None, 'process exited before controlled shutdown'
+    started = time.time_ns()
+    process.terminate()
+    code = process.wait(timeout=10)
+    assert code == 0, f'graceful shutdown failed: exit {code}'
+    return {'pid': process.pid, 'startedAtNs': started,
+            'completedAtNs': time.time_ns(), 'returnCode': code}
+
+
+def timestamp_ns(value):
+    # Go publishes UTC RFC3339Nano; retain all nine fractional digits.
+    match = re.fullmatch(r'(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z', value)
+    assert match, 'invalid health publication timestamp'
+    seconds = int(datetime.fromisoformat(match[1]).replace(tzinfo=timezone.utc).timestamp())
+    return seconds*1_000_000_000 + int((match[2] or '').ljust(9, '0'))
+
+
+def verify_ledger(found, boot, completions, instance):
+    assert found, 'durable ledger missing'
+    calls = {}
+    content_bytes = 0
+    for event in found:
+        assert event['pluginBootId'] == boot and event['instanceId'] == instance, 'unexpected capture boot/instance'
+        assert event['destinationId'] == 'harness-dev' and event['requestId'], 'unexpected capture scope'
+        assert not (event.get('gap') or event.get('captureIncomplete') or event.get('lostContentBytes', 0)), 'captured protocol content has gaps'
+        body = base64.b64decode(event.get('body', ''), validate=True)
+        error = event.get('error', '').encode()
+        assert len(body) == event['contentBytes'] == event.get('observedBodyBytes', 0), 'body byte accounting differs'
+        assert hashlib.sha256(body).hexdigest() == event['contentSha256'], 'body digest differs'
+        assert len(error) == event.get('observedErrorBytes', 0), 'error byte accounting differs'
+        assert DEV.encode() not in body, 'routing credential reached content'
+        content_bytes += len(body) + len(error)
+        calls.setdefault(event['requestId'], []).append(event)
+    assert sum(e['kind'] == 'completion' for e in found) == completions, 'completion count differs'
+    for call in calls.values():
+        call.sort(key=lambda e: e['sequence'])
+        assert [e['sequence'] for e in call] == list(range(1, len(call)+1)), 'sequence gap'
+        assert call[-1]['kind'] == 'completion' and sum(e['kind'] == 'completion' for e in call) == 1, 'call terminal missing or misplaced'
+    return content_bytes
+
+
+def final_health(boot, completions, tail, shutdown, config):
+    assert shutdown['returnCode'] == 0, 'graceful shutdown failed'
+    found = events()  # Re-read the complete ledger, including outage/error tail.
+    content_bytes = verify_ledger(found, boot, completions, config['instanceId'])
+    assert tail in found, 'tail completion missing or changed'
+    assert max(timestamp_ns(e['observedAt']) for e in found) <= shutdown['startedAtNs'], 'shutdown boundary predates captured tail'
+    with closing(sqlite3.connect(ROOT/'outbox/events.db')) as db:
+        rows = [json.loads(row[0]) for row in db.execute('SELECT payload FROM health')]
+    health = [h for h in rows if h['pluginBootId'] == boot and h['instanceId'] == config['instanceId']]
+    destinations = {b['destinationId'] for b in config['bindings']}
+    assert len(health) == len(destinations) and {h['destinationId'] for h in health} == destinations, 'current-boot health missing'
+    for h in health:
+        assert shutdown['startedAtNs'] <= timestamp_ns(h['observedAt']) <= shutdown['completedAtNs'], 'final health publication missing or stale'
+        assert h['observationsTotal'] == len(found), 'final health does not cover complete ledger'
+        assert h['activeCalls'] == 0 and h['droppedObservationsTotal'] == 0 and h['lostControlObservationsTotal'] == 0, 'capture record loss'
+        content = h['content']
+        assert content_bytes > 0 and content['observedBytes'] == content['committedBytes'] == content_bytes, 'final health byte accounting differs'
+        assert all(content[k] == 0 for k in ['lostBytes', 'unconfirmedBytes', 'unknownLosses', 'missedCalls', 'incompleteCalls', 'capacityRejections', 'retainedChargedBytes']), 'capture content loss or uncertainty'
+        assert h['precommitCoverage'] == 'unknown_before_local_commit', 'process-loss boundary differs'
+    return health, {'pluginBootId': boot, 'observations': len(found),
+                    'contentBytes': content_bytes, 'tailRequestId': tail['requestId'],
+                    'tailSequence': tail['sequence'], 'tailObservedAt': tail['observedAt'],
+                    'shutdown': shutdown}
 
 def wait_events(expected):
     for _ in range(100):
@@ -244,7 +313,6 @@ def main():
     def start_stock(enabled):
         (ROOT/'stock.yaml').write_text(config(enabled))
         p=subprocess.Popen(['/stock/cli-proxy-api','-config',str(ROOT/'stock.yaml')],env={**os.environ,'CLIPROXY_CAPTURE_CONFIG':str(ROOT/'capture.json')},stdout=open(ROOT/f'stock-{enabled}.log','wb'),stderr=subprocess.STDOUT);procs.append(p);wait_port(8317);return p
-    def stop_proc(p):p.terminate();p.wait(timeout=10)
     try:
         exporter=start_exporter()
         subprocess.run(nginx_command('-t'), check=True)
@@ -263,7 +331,11 @@ def main():
             elapsed=time.monotonic()-start;stop.set();monitor.join()
             assert all(r[0]==200 and b'CAPTURE_' in r[1] for r in results)
             report['enabled' if enabled else 'baseline']={'ttfbMs':percentiles([r[2] for r in results]),'latencyMs':percentiles([r[3] for r in results]),'callsPerSecond':len(results)/elapsed,'peakRssKiB':samples}
-        base=sum(e['kind']=='completion' for e in wait_events(5 if protocol_only else 165))
+        base=5 if protocol_only else 165
+        initial=wait_events(base)
+        boot=initial[0]['pluginBootId']
+        assert {e['pluginBootId'] for e in initial}=={boot}, 'capture restarted during fixture'
+        assert sum(e['kind']=='completion' for e in initial)==base, 'initial completion count differs'
         captures={}
         content_proof={}
         for route,stream in [(route,stream) for route in ['/v1/messages','/v1/responses','/v1/chat/completions'] for stream in [False,True]]:
@@ -343,14 +415,7 @@ def main():
         report['preHookFailure']='unavailable: malformed request rejected before plugin lifecycle'
         report['postHookFailure']='failed completion captured'
         assert all(not any(k.lower().startswith('x-meshix-capture-') for k in h) for h in provider_headers),'authority reached provider'
-        for e in found:
-            body=__import__('base64').b64decode(e.get('body',''));assert hashlib.sha256(body).hexdigest()==e['contentSha256'];assert DEV.encode() not in body
-            assert e['destinationId']=='harness-dev' and e['requestId'] and e['pluginBootId']
-        assert not any(e.get('gap') for e in found),'captured protocol content has gaps'
-        for e in found:
-            if e['kind']=='completion':
-                sequence=[x['sequence'] for x in found if x['requestId']==e['requestId']]
-                assert sequence==list(range(1,e['sequence']+1)), 'sequence gap'
+        verify_ledger(found, boot, base+11, capture_config['instanceId'])
         report['protocolProof']=captures;report['durableEventsBeforeRestart']=len(found)
         stop_proc(exporter);exporter=start_exporter();assert len(events())==len(found)
         # Outbox unavailable: inference succeeds; ACKed events survive and unACKed events replay.
@@ -365,16 +430,10 @@ def main():
         assert terminal.get('error','').encode()==error_body, 'post-hook error bytes differ'
         assert b''.join(base64.b64decode(e.get('body','')) for e in error_call if e['kind']=='request')==content_requests['error-proof'], 'failed request content differs'
         report['errorContentProof']={'downstreamSHA256':hashlib.sha256(error_body).hexdigest(),'capturedDiagnosticSHA256':hashlib.sha256(terminal['error'].encode()).hexdigest(),'failedRequestBytes':len(content_requests['error-proof'])}
-        stop_proc(stock)  # Graceful drain publishes final durable byte accounting.
-        with closing(sqlite3.connect(ROOT/'outbox/events.db')) as db:
-            health=[json.loads(row[0]) for row in db.execute('SELECT payload FROM health')]
-        assert health, 'durable boot health missing'
-        for h in health:
-            assert h['activeCalls']==0 and h['droppedObservationsTotal']==0 and h['lostControlObservationsTotal']==0, 'capture record loss'
-            content=h['content']
-            assert content['observedBytes']>0 and content['observedBytes']==content['committedBytes'], 'uncommitted observed content'
-            assert all(content[k]==0 for k in ['lostBytes','unconfirmedBytes','unknownLosses','missedCalls','incompleteCalls','capacityRejections','retainedChargedBytes']), 'capture content loss or uncertainty'
+        shutdown=stop_proc(stock)
+        health,boundary=final_health(boot, base+13, terminal, shutdown, capture_config)
         report['finalHealth']=health
+        report['finalHealthBoundary']=boundary
         report['processLossBoundary']='unknown_before_local_commit; graceful drain is not crash-loss proof'
         report['durability']='restart + collector unavailable replay passed';report['scope']='personal/preview/case/conflict/missing deployment/device spoof excluded; gateway overwrite and both carriers passed'
         (ROOT/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))

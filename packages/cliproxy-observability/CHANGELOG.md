@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.9
+
+- Native 0.2.6 negotiates registration/reconfigure with host maximum schemas >= 6 while continuing to advertise ABI 1 / producer RPC schema 6 and the same four capture capabilities. This admits stock 8.0.51 without enabling body omission or raw body patching. A newer host maximum does not select a newer callback format; malformed/out-of-range versions and hosts below 6 remain rejected.
+- Capture framing, receiver/parser, SQLite schema, FULL/WAL, retention, limits, queues and backpressure are unchanged. The exporter is rebuilt with the existing pinned toolchain; its source changes only through the shared native version identity. Current-data reopen/write/delivery and prior-exporter rollback qualification remain separate activation gates.
+
 ## 0.3.8
 
 - Recognize the captured Responses `response.metadata` extension, validate its object payload, sequence and response identity, and preserve every envelope in selected-call `metadata.responseMetadata`. Valid metadata no longer withholds the six terminal token scalars. Lifecycle `response.metadata` remains separate in native output.

@@ -17,5 +17,5 @@ RUN case "$TARGETARCH" in \
 COPY --from=build /build/ /capture/
 COPY harness/ /harness/
 WORKDIR /harness
-RUN CLIPROXY_HARNESS_ISOLATED=1 python3 -m unittest test_nginx_isolation.py
+RUN CLIPROXY_HARNESS_ISOLATED=1 python3 -m unittest test_nginx_isolation.py test_final_health.py
 ENTRYPOINT ["python3", "/harness/proof.py"]

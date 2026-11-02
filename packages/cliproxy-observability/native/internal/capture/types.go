@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const Version = "0.2.5"
+const Version = "0.2.6"
 const CapturePolicy = "hook-content-block-v1"
 const MaxBody = 1 << 20
 const MaxFrame = 2 << 20

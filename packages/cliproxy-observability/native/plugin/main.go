@@ -93,9 +93,12 @@ func dispatch(method string, raw []byte) (any, bool) {
 	switch method {
 	case "plugin.register", "plugin.reconfigure":
 		var req struct {
-			SchemaVersion int `json:"schema_version"`
+			SchemaVersion uint32 `json:"schema_version"`
 		}
-		if json.Unmarshal(raw, &req) != nil || req.SchemaVersion != 6 {
+		// Stock advertises its maximum supported schema, then uses our
+		// schema-6 reply for callbacks. A newer maximum does not opt us into
+		// newer callback formats or capabilities (see host-compatibility.md).
+		if json.Unmarshal(raw, &req) != nil || req.SchemaVersion < 6 {
 			return nil, false
 		}
 		mu.Lock()

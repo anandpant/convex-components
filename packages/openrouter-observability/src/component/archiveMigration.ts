@@ -1,6 +1,5 @@
 import { getConvexSize, v } from "convex/values";
 import { mutation, query } from "./_generated/server.js";
-import { storedCacheWriteTokens } from "./parser.js";
 import { spanPayloadRef } from "./spanValues.js";
 
 // Temporary: moves rows stored before 0.5.0 to archived objects. A host script pages inline
@@ -10,7 +9,6 @@ import { spanPayloadRef } from "./spanValues.js";
  * and a batch of its marks stay under the 16 MiB read and return limits. */
 const PAGE_ROWS = 120;
 const PAGE_BYTES = 8 * 1024 * 1024;
-const encoder = new TextEncoder();
 
 /** The next rows, in `_id` order after `after`, that still hold their content inline. */
 export const pageInline = query({
@@ -37,31 +35,28 @@ export const pageInline = query({
 });
 
 /**
- * Point an inline row at its confirmed object and drop the inline content. A row already
- * archived is left as it is, so a repeated or resumed run changes nothing.
+ * Point inline rows at their confirmed objects and drop the inline content. The caller computes
+ * the payload facts from the row it paged, so the patch is the only read of each row; repeating
+ * it for an archived row writes the same values again.
  */
 export const markArchived = mutation({
-  args: { items: v.array(v.object({ spanDocumentId: v.id("spans"), payload: spanPayloadRef })) },
+  args: {
+    items: v.array(
+      v.object({
+        spanDocumentId: v.id("spans"),
+        payload: spanPayloadRef,
+        inputUtf8Bytes: v.optional(v.number()),
+        outputUtf8Bytes: v.optional(v.number()),
+        attributeCount: v.number(),
+        resourceAttributeCount: v.number(),
+        cacheCreationInputTokens: v.optional(v.number()),
+      }),
+    ),
+  },
   handler: async (ctx, { items }) => {
-    const outcomes = { archived: 0, alreadyArchived: 0, missing: 0 };
-    for (const { spanDocumentId, payload } of items) {
-      const row = await ctx.db.get("spans", spanDocumentId);
-      if (row === null) {
-        outcomes.missing += 1;
-        continue;
-      }
-      if (row.payload !== undefined) {
-        outcomes.alreadyArchived += 1;
-        continue;
-      }
-      const attributes = row.attributes ?? [];
+    for (const { spanDocumentId, ...facts } of items) {
       await ctx.db.patch("spans", spanDocumentId, {
-        payload,
-        inputUtf8Bytes: row.input === undefined ? undefined : encoder.encode(row.input).length,
-        outputUtf8Bytes: row.output === undefined ? undefined : encoder.encode(row.output).length,
-        attributeCount: attributes.length,
-        resourceAttributeCount: row.resourceAttributes?.length ?? 0,
-        cacheCreationInputTokens: storedCacheWriteTokens(attributes),
+        ...facts,
         input: undefined,
         output: undefined,
         attributes: undefined,
@@ -70,8 +65,7 @@ export const markArchived = mutation({
         linksJson: undefined,
         statusJson: undefined,
       });
-      outcomes.archived += 1;
     }
-    return outcomes;
+    return { archived: items.length };
   },
 });

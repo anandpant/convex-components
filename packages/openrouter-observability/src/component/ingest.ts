@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel.js";
 import { mutation } from "./_generated/server.js";
 import { MAX_SPAN_VARIANTS, slimSpan } from "./spanValues.js";
 
@@ -12,6 +13,15 @@ export const admitPrepared = mutation({
   handler: async (ctx, args) => {
     const seen = new Set<string>();
     let admitted = 0;
+    // New rows and newly recorded variants, so the host can forward exactly what it stored.
+    const stored: Array<{
+      spanDocumentId: Id<"spans">;
+      traceId: string;
+      spanId: string;
+      sha256: string;
+      receivedAt: number;
+      kind: "span" | "variant";
+    }> = [];
     const receivedAt = Date.now();
     for (const span of args.spans) {
       const key = JSON.stringify([span.traceId, span.spanId]);
@@ -34,15 +44,32 @@ export const admitPrepared = mutation({
             ? { variants: [...(existing.variants ?? []), { ...span.payload, receivedAt }] }
             : {}),
         });
+        stored.push({
+          spanDocumentId: existing._id,
+          traceId: span.traceId,
+          spanId: span.spanId,
+          sha256: span.payload.sha256,
+          receivedAt,
+          kind: "variant",
+        });
         continue;
       }
-      await ctx.db.insert("spans", { ...span, receivedAt });
+      const spanDocumentId = await ctx.db.insert("spans", { ...span, receivedAt });
+      stored.push({
+        spanDocumentId,
+        traceId: span.traceId,
+        spanId: span.spanId,
+        sha256: span.payload.sha256,
+        receivedAt,
+        kind: "span",
+      });
       admitted += 1;
     }
     return {
       kind: "accepted",
       admitted,
       duplicates: args.spans.length - admitted,
+      stored,
     } as const;
   },
 });

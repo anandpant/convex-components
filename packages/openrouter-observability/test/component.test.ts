@@ -43,6 +43,7 @@ async function post(
   headers: HeadersInit = JSON_HEADERS,
   storage: TraceBlobStorage = { put: async () => undefined },
   method: "POST" | "PUT" = "POST",
+  onStored?: Parameters<typeof handleOpenRouterTraceRequest>[2]["onStored"],
 ) {
   return await handleOpenRouterTraceRequest(
     {
@@ -55,6 +56,7 @@ async function post(
       bearerToken: TOKEN,
       blobStorage: storage,
       spanPrefix: "test/spans",
+      onStored,
     },
   );
 }
@@ -308,6 +310,71 @@ describe("OpenRouter observability component", () => {
       expect(variant.sha256).not.toBe(row.payload.sha256);
     }
     expect(storage.objects.size).toBe(11);
+  });
+
+  it("reports each stored span and variant with its content, and never fails on the hook", async () => {
+    const backend = createBackend();
+    const storage = memoryStorage();
+    const seen: Array<{ kind: string; name: string; sha256: string }> = [];
+    const onStored = async (
+      stored: ReadonlyArray<{
+        kind: string;
+        span: { name: string };
+        row: { payload: { sha256: string } };
+      }>,
+    ) => {
+      for (const entry of stored)
+        seen.push({ kind: entry.kind, name: entry.span.name, sha256: entry.row.payload.sha256 });
+    };
+    const deliver = (name: string, hook = onStored) =>
+      post(
+        backend,
+        JSON.stringify(envelope({ traceId: "trace", spanId: "span", name })),
+        JSON_HEADERS,
+        storage.adapter,
+        "POST",
+        hook,
+      );
+
+    expect((await deliver("first")).status).toBe(202);
+    expect((await deliver("first")).status).toBe(204);
+    expect((await deliver("second")).status).toBe(204);
+    expect(seen.map(({ kind, name }) => [kind, name])).toEqual([
+      ["span", "first"],
+      ["variant", "second"],
+    ]);
+    for (const { sha256 } of seen) {
+      expect([...storage.objects.values()].some((object) => object.sha256 === sha256)).toBe(true);
+    }
+
+    const failing = async () => {
+      throw new Error("downstream unavailable");
+    };
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect((await deliver("third", failing)).status).toBe(204);
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("pages stored rows in creation order without repeats", async () => {
+    const backend = createBackend();
+    for (let index = 0; index < 5; index++) {
+      await post(
+        backend,
+        JSON.stringify(envelope({ traceId: `t${index}`, spanId: "s", name: `n${index}` })),
+      );
+    }
+    const ids: string[] = [];
+    let after: number | undefined;
+    for (let page = 0; page < 5; page++) {
+      const result = await backend.query(api.queries.pageStoredSince, { after, limit: 2 });
+      ids.push(...result.page.map((row) => row.traceId));
+      after = result.cursor;
+      if (result.done) break;
+    }
+    expect(ids).toEqual(["t0", "t1", "t2", "t3", "t4"]);
+    const [first] = (await backend.query(api.queries.pageStoredSince, { limit: 1 })).page;
+    expect(first?.payload?.key).toContain("/t0/s/");
   });
 
   it("does not collapse distinct trace and span ID pairs", async () => {

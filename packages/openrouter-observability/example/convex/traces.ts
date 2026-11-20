@@ -26,32 +26,22 @@ export const requestSpanSummaries = internalQuery({
     }),
 });
 
-export const sessionSpanSummaries = internalQuery({
-  args: { sessionId: v.string(), limit: v.optional(v.number()), cursor: v.optional(cursor) },
+export const runSpanSummaries = internalQuery({
+  args: { runId: v.string(), limit: v.optional(v.number()), cursor: v.optional(cursor) },
   handler: async (ctx, args) =>
     await observability.pageCorrelationSummaries(ctx, {
-      correlation: { kind: "session", sessionId: args.sessionId },
+      correlation: { kind: "run", runId: args.runId },
       limit: args.limit,
       cursor: args.cursor,
     }),
 });
 
-export const traceSpanSummaries = internalQuery({
-  args: { traceId: v.string(), limit: v.optional(v.number()), cursor: v.optional(v.string()) },
-  handler: async (ctx, args) =>
-    await observability.pageTraceSummaries(ctx, {
-      traceId: args.traceId,
-      limit: args.limit,
-      cursor: args.cursor as Parameters<typeof observability.pageTraceSummaries>[1]["cursor"],
-    }),
-});
-
-export const fullSpanExport = internalQuery({
+export const storedSpan = internalQuery({
   args: { spanDocumentId: v.string() },
   handler: async (ctx, args) =>
-    await observability.exportFullSpan(ctx, {
+    await observability.getSpan(ctx, {
       spanDocumentId: args.spanDocumentId as Parameters<
-        typeof observability.exportFullSpan
+        typeof observability.getSpan
       >[1]["spanDocumentId"],
     }),
 });

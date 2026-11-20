@@ -1,6 +1,6 @@
 # OpenRouter observability for Convex
 
-`@shpitdev/convex-openrouter-observability` receives OpenRouter Broadcast OTLP JSON inside your existing Convex deployment. It stores typed spans in component-owned tables so your host Convex functions can query traces by user, session, request, or application entity. A host-owned adapter stores inline images and large content outside Convex.
+`@shpitdev/convex-openrouter-observability` receives OpenRouter Broadcast OTLP JSON inside your existing Convex deployment. It stores one slim row per span (identity, correlation, model, usage and cost) so host Convex functions can list spans by request, run, or job. A host-owned adapter stores each span's full content as one object outside Convex, along with inline images and large values.
 
 The component is specific to OpenRouter Broadcast traces. It is not a general OTLP collector.
 
@@ -19,12 +19,7 @@ import { defineApp } from "convex/server";
 
 const app = defineApp();
 
-app.use(openrouterObservability, {
-  name: "openrouterObservability",
-  env: {
-    RETENTION_DAYS: "30",
-  },
-});
+app.use(openrouterObservability, { name: "openrouterObservability" });
 
 export default app;
 ```
@@ -52,6 +47,7 @@ const ingestOpenRouterTrace = httpAction(
       component: components.openrouterObservability,
       bearerToken: process.env.OPENROUTER_OBSERVABILITY_TOKEN,
       blobPrefix: "observability/openrouter/v1",
+      spanPrefix: "observability/spans/v1",
       blobStorage: {
         put: async (object: TraceBlobPut) => await putTraceBlob(ctx, object),
       },
@@ -92,36 +88,24 @@ The host routes are:
 | `PUT`  | `/traces` | Ingest a delivery |
 | `GET`  | `/health` | Return `ok`       |
 
-`RETENTION_DAYS` is optional and defaults to 30. It accepts integer strings from 1 through 3650. A daily job deletes expired spans in indexed batches.
+Spans are kept indefinitely; the component deletes nothing. Keep object-store lifecycle expiration off for the span and blob prefixes.
 
-Set `RETENTION_DAYS: "indefinite"` in the component's `env` configuration to keep spans and their deduplication keys indefinitely. The daily maintenance job does not schedule expired-span deletion, and cleanup continuations queued before the configuration change delete nothing and stop. Migrations and correlation backfills continue, including removal of legacy raw-delivery rows.
+## Where content lives
 
-Invalid retention configuration makes the cleanup job fail. Treat that as an operational configuration error and alert on failed Convex cron runs. `/health` is only a liveness route and does not report retention readiness.
+Each admitted span has a slim row and one archived object. The object is the prepared span as UTF-8 JSON (input, output, attributes, resource attributes, events, links, status, and every typed field) at `<spanPrefix>/<traceId>/<spanId>/<sha256>.json`. The row records that key, the SHA-256 digest and byte length in `payload`, plus the facts a summary needs: content byte counts, attribute counts, and cache-write tokens. Listing never loads content.
 
-Configure object-store lifecycle deletion on the dedicated trace prefix. For a 30-day component retention period, 35 days is a practical blob lifetime: full spans disappear first, then the store removes their objects and any uploads orphaned by a failed Convex mutation. The adapter intentionally has no delete or reference-count contract.
-For indefinite retention, disable lifecycle expiration on retained trace blobs as well; `RETENTION_DAYS` does not change the host's object-store configuration.
-
-The initial release also performs a bounded, idempotent migration for deployments upgrading from
-the former Prismantix-local component: it adds compact deduplication keys, fills the newly separated
-resource-attribute field, and removes the incubator's raw-delivery rows. Ingestion returns `503`
-while legacy span keys are being prepared so duplicate checks remain within Convex transaction limits.
+`loadFullSpan(reader, row, { maxBytes })` returns the full span in an action: it reads the object, checks its length and digest, and merges it under the row. Rows stored before 0.5.0 hold their content inline until the host archives them; `loadFullSpan` returns those unchanged.
 
 ## Compact discovery and full export
 
-The query contract separates discovery from content export:
+- `pageCorrelationSummaries` lists spans by indexed request, run, or job, newest first.
+- `getSpan` returns one stored row by the `spanDocumentId` from a summary; pass it to `loadFullSpan` for content.
 
-- `pageCorrelationSummaries` searches the indexed request, session, user, entity, run, job, root-execution, or explicit OpenCode-session field.
-- `pageTraceSummaries` walks one trace.
-- `pageRecentSummaries` supports administrator discovery across owners.
-- `exportFullSpan` returns one full span by the `spanDocumentId` from a summary.
-
-Every page returns `cursor` and `done`. Correlation pages emit at most seven summaries, trace pages at most six, and every call reads at most eight full documents including lookahead and trace-cursor resolution. Summary strings are clipped to 128 characters and named in `truncatedFields`. The serialized page stays at or below 32 KiB and advances its cursor from the last emitted row when the byte limit shortens a page. Content, raw attributes, events, and links appear only in `exportFullSpan`.
+Every page returns `cursor` and `done` and emits at most 25 summaries. Summary strings are clipped to 128 characters and named in `truncatedFields`. The serialized page stays at or below 32 KiB and advances its cursor from the last emitted row when the byte limit shortens a page.
 
 Each summary carries the provider-native token counts its span recorded: `inputTokens`, `outputTokens`, `totalTokens`, `reasoningTokens`, `cachedInputTokens` (cache reads), and `cacheCreationInputTokens` (cache writes). `inputTokens` already includes both cache counts. Cache writes are read from the span's stored `gen_ai.usage.input_tokens.cache_write` attribute, so spans stored before summaries carried them report them too. A count the span did not record is absent, never 0.
 
 `totalCost` is OpenRouter's charge. On a BYOK call (`isByok: true`) that charge is only OpenRouter's fee, and `byokInferenceUsageCost` is the inference the provider billed to the caller's own key. The call's cost is their sum.
-
-The explicit `opencodeSession` correlation reads only `trace.metadata.opencode_session_id`. It does not treat every OpenRouter `session.id` as an OpenCode session. New run, job, root-execution, and OpenCode-session indexes return `status: "not_ready"` until the bounded historical backfill reports ready through `getCorrelationProjectionCoverage`. Ingestion starts the backfill immediately on an upgraded deployment; the daily maintenance job retries it. Empty deployments are ready without waiting for the cron. This prevents a partial index from looking like an empty result.
 
 Component query functions are internal references from the host's perspective. The executable [`example/convex/traces.ts`](example/convex/traces.ts) exposes only `internalQuery` wrappers for CLI use. A product-facing wrapper must authorize its host record before it passes an opaque correlation value to the component.
 
@@ -141,7 +125,7 @@ Do not add `--push` during inspection. Put full exports in a permission-restrict
 umask 077
 pnpm exec convex run \
   --component openrouterObservability \
-  queries:exportFullSpan \
+  queries:getSpan \
   '{"spanDocumentId":"<id-from-summary>"}' \
   --typecheck disable --codegen disable --deployment <reference> \
   > .memory/openrouter-span.json
@@ -172,19 +156,18 @@ Valid JSON with an unfamiliar role is `unsupported`. An unfamiliar content part 
 - One extracted blob defaults to a 6 MiB cap. All extracted bytes in one request also fit under the request cap. Strings above 64 KiB move to blob storage; hosts may lower that threshold.
 - The handler decodes explicit data URLs and recognized binary fields. It does not guess that arbitrary text is base64.
 - Input or output JSON containing integers outside JavaScript's safe range, or non-finite exponents, moves as one exact UTF-8 JSON blob. This preserves number lexemes, duplicate keys, escapes, and key order instead of silently rounding during parsing.
-- The handler recursively replaces externalized input, output, attributes, resource attributes, events, links, and status values before calling the component mutation. The mutation rejects data URLs, recognized binary fields, and oversized strings that bypassed preparation.
+- The handler recursively replaces externalized input, output, attributes, resource attributes, events, links, and status values before archiving the span.
 - Remote URLs are never fetched. A host can provide `mapRemoteUrl` to replace its own ephemeral signed URL with a stable owned reference; otherwise the original URL stays an external reference.
 - Empty authenticated OpenRouter Test Connection envelopes return `204` without writes.
 - OTLP resource spans, scope spans, spans, attributes, events, and links have explicit count limits.
-- Expanded stored spans are size-checked before admission so shared resource metadata cannot exceed Convex document or transaction limits through fan-out.
-- The handler validates and plans the complete delivery, uploads deterministic objects, then writes all new spans in one mutation. Invalid input or an upload failure writes no spans. A mutation failure can leave objects until the prefix lifecycle removes them.
+- The handler validates and plans the complete delivery, uploads blobs and one object per span, then writes all new slim rows in one mutation. Invalid input or an upload failure writes no spans. A mutation failure or a redelivery can leave unreferenced objects; nothing reads them.
 - `(traceId, spanId)` identifies duplicates. New deliveries return `202`; duplicate-only deliveries return `204`.
 - Known correlation, model, token, and cost values get typed columns. Unknown span and resource attributes retain their order and OTLP typed values, with large or binary values replaced by durable references.
 - The component does not keep raw webhook bodies.
 
 ## Resolving stored blobs
 
-Component queries return references and never download objects or mint signed URLs. After the host authorizes access to the owning request or application record, resolve a reference against the exported span:
+Component queries return references and never download objects or mint signed URLs. After the host authorizes access to the owning request or application record, resolve a reference against the full span from `loadFullSpan`:
 
 ```ts
 const result = await resolveTraceBlob(reader, exportedSpan, reference, {

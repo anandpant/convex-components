@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Each span is stored as a slim row plus one archived object holding its full content. The host handler writes the object through the existing `TraceBlobStorage` at `<spanPrefix>/<traceId>/<spanId>/<sha256>.json` (new `spanPrefix` option), then admits the row. Rows record the object's key, digest and length in `payload`, with content byte counts, attribute counts and cache-write tokens precomputed, so listing never reads content.
+- `loadFullSpan(reader, row, { maxBytes })` returns a span's full content in an action and checks the object's length and digest. `archiveSpan` lets a host admit a span it prepared itself.
+- `getSpan` replaces `exportFullSpan` and returns the stored row. `pageCorrelationSummaries` keeps the request, run, and job correlations and returns up to 25 summaries per page.
+- Removed: `pageTraceSummaries`, `pageRecentSummaries`, `getCorrelationProjectionCoverage`, the session, user, entity, root-execution and OpenCode-session correlations and their indexes, the `by_received` index, retention (`RETENTION_DAYS` and its cron), and the Prismantix and correlation migrations. Spans are kept indefinitely. Deduplication uses the span table's own `(traceId, spanId)` index instead of `spanKeys`.
+- Rows stored before 0.5.0 keep their content inline and still summarize and load. A host migrates them to archived objects; 0.6.0 removes the inline form and the unused `spanKeys`, `deliveries` and `migrationState` tables.
+
+Breaking change: remove `env.RETENTION_DAYS` from `app.use`, pass `spanPrefix`, and read content through `getSpan` and `loadFullSpan` in an action.
+
 ## 0.4.2
 
 - Summaries carry `cacheCreationInputTokens`, read from the span's stored `gen_ai.usage.input_tokens.cache_write` attribute (or `trace.metadata.openrouter_generation.cache_write_tokens`), so spans stored before this release report it too. 0.4.1 said OpenRouter records no cache writes; it does, and `inputTokens` already includes them.

@@ -5,7 +5,8 @@ export const storedAttribute = v.object({
   valueJson: v.string(),
 });
 
-export const parsedSpanFields = {
+/** Identity, correlation, model, usage and cost: everything a summary or a lookup reads. */
+const scalarSpanFields = {
   traceId: v.string(),
   spanId: v.string(),
   parentSpanId: v.optional(v.string()),
@@ -58,14 +59,56 @@ export const parsedSpanFields = {
   isByok: v.optional(v.boolean()),
   apiKeyName: v.optional(v.string()),
   streamed: v.optional(v.boolean()),
+} as const;
+
+/** Content that lives in the span's archived object, never in the row. */
+const payloadFields = {
   input: v.optional(v.string()),
   output: v.optional(v.string()),
   attributes: v.array(storedAttribute),
-  // Optional only while legacy Prismantix rows are migrated in place.
   resourceAttributes: v.optional(v.array(storedAttribute)),
   eventsJson: v.optional(v.string()),
   linksJson: v.optional(v.string()),
   statusJson: v.optional(v.string()),
 } as const;
 
+/** The archived object holding a span's full content: the prepared span as UTF-8 JSON. */
+export const spanPayloadRef = v.object({
+  key: v.string(),
+  sha256: v.string(),
+  byteLength: v.number(),
+});
+
+/** Payload facts a summary needs, computed once at ingest so listing never loads content. */
+const payloadFacts = {
+  inputUtf8Bytes: v.optional(v.number()),
+  outputUtf8Bytes: v.optional(v.number()),
+  attributeCount: v.number(),
+  resourceAttributeCount: v.number(),
+  cacheCreationInputTokens: v.optional(v.number()),
+} as const;
+
+export const parsedSpanFields = { ...scalarSpanFields, ...payloadFields } as const;
 export const parsedSpan = v.object(parsedSpanFields);
+
+export const slimSpanFields = {
+  ...scalarSpanFields,
+  ...payloadFacts,
+  payload: spanPayloadRef,
+} as const;
+export const slimSpan = v.object(slimSpanFields);
+
+/**
+ * A stored span. Rows written before 0.5.0 still hold their content inline and have no
+ * `payload`; the one-off archive migration moves it out, and 0.6.0 drops these optional forms.
+ */
+export const storedSpanFields = {
+  ...scalarSpanFields,
+  ...payloadFacts,
+  attributeCount: v.optional(v.number()),
+  resourceAttributeCount: v.optional(v.number()),
+  payload: v.optional(spanPayloadRef),
+  ...payloadFields,
+  attributes: v.optional(v.array(storedAttribute)),
+  receivedAt: v.number(),
+} as const;

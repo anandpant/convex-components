@@ -25,6 +25,6 @@ describe("internal CLI query example", () => {
     componentTest.register(backend);
     await expect(
       backend.query(requestSpanSummaries, { requestId: "request-123" }),
-    ).resolves.toMatchObject({ status: "ready", page: [], done: true });
+    ).resolves.toMatchObject({ page: [], done: true });
   });
 });

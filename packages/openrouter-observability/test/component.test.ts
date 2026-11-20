@@ -1,15 +1,22 @@
 /// <reference types="vite/client" />
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { convexTest } from "convex-test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, internal } from "../src/component/_generated/api.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  handleOpenRouterTraceRequest,
+  loadFullSpan,
+  readBoundedTraceBody,
+  type SpanCursor,
+  type TraceBlobStorage,
+} from "../src/client.js";
+import { api } from "../src/component/_generated/api.js";
 import type { ComponentApi } from "../src/component/_generated/component.js";
 import { parseOpenRouterOtlpDelivery } from "../src/component/parser.js";
 import schema from "../src/component/schema.js";
-import { handleOpenRouterTraceRequest, readBoundedTraceBody } from "../src/ingestion.js";
-import type { TraceBlobPut, TraceBlobStorage } from "../src/blobContent.js";
+import { memoryStorage } from "./memoryStorage.js";
 
 const modules = import.meta.glob("../src/component/**/*.ts");
 const TOKEN = "test-openrouter-observability-token";
@@ -42,34 +49,22 @@ async function post(
       runMutation: async (_reference, args) =>
         await backend.mutation(api.ingest.admitPrepared, args as never),
     },
-    new Request("https://example.test/openrouter/traces", {
-      method,
-      headers,
-      body,
-    }),
+    new Request("https://example.test/openrouter/traces", { method, headers, body }),
     {
       component: api as unknown as ComponentApi,
       bearerToken: TOKEN,
       blobStorage: storage,
+      spanPrefix: "test/spans",
     },
   );
 }
 
-function envelope(span: Record<string, unknown>) {
-  return { resourceSpans: [{ scopeSpans: [{ spans: [span] }] }] };
+function envelope(...spans: Record<string, unknown>[]) {
+  return { resourceSpans: [{ scopeSpans: [{ spans }] }] };
 }
 
 describe("OpenRouter observability component", () => {
-  beforeEach(() => {
-    process.env.WEBHOOK_TOKEN = TOKEN;
-    delete process.env.RETENTION_DAYS;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    delete process.env.WEBHOOK_TOKEN;
-    delete process.env.RETENTION_DAYS;
-  });
+  afterEach(() => vi.useRealTimers());
 
   it.each([
     ["missing authorization", { "content-type": "application/json" }, 401],
@@ -112,37 +107,19 @@ describe("OpenRouter observability component", () => {
     const backend = createBackend();
     const oversized = `"${"a".repeat(8 * 1024 * 1024)}"`;
     expect((await post(backend, oversized)).status).toBe(413);
-    const tooManySpans = {
-      resourceSpans: [
-        {
-          scopeSpans: [
-            {
-              spans: Array.from({ length: 65 }, (_, index) => ({
-                traceId: "trace",
-                spanId: `span-${index}`,
-                name: "bounded",
-              })),
-            },
-          ],
-        },
-      ],
-    };
-    expect((await post(backend, JSON.stringify(tooManySpans))).status).toBe(413);
+    const spans = Array.from({ length: 65 }, (_, index) => ({
+      traceId: "trace",
+      spanId: `span-${index}`,
+      name: "bounded",
+    }));
+    expect((await post(backend, JSON.stringify(envelope(...spans)))).status).toBe(413);
     const expandedResourceAttributes = {
       resourceSpans: [
         {
           resource: {
             attributes: [{ key: "large.resource", value: { stringValue: "x".repeat(200 * 1024) } }],
           },
-          scopeSpans: [
-            {
-              spans: Array.from({ length: 64 }, (_, index) => ({
-                traceId: "trace",
-                spanId: `span-${index}`,
-                name: "expanded resource metadata",
-              })),
-            },
-          ],
+          scopeSpans: [{ spans: spans.slice(0, 64) }],
         },
       ],
     };
@@ -226,224 +203,184 @@ describe("OpenRouter observability component", () => {
 
   it("accepts authenticated Test Connection with no write", async () => {
     const backend = createBackend();
-    const response = await post(backend, JSON.stringify({ resourceSpans: [] }), {
-      ...JSON_HEADERS,
-      "x-test-connection": "true",
-    });
+    const storage = memoryStorage();
+    const response = await post(
+      backend,
+      JSON.stringify({ resourceSpans: [] }),
+      { ...JSON_HEADERS, "x-test-connection": "true" },
+      storage.adapter,
+    );
     expect(response.status).toBe(204);
     expect(await storedSpans(backend)).toHaveLength(0);
+    expect(storage.objects.size).toBe(0);
   });
 
-  it.each(["POST", "PUT"] as const)("atomically ingests a real fixture over %s", async (method) => {
-    const backend = createBackend();
-    const response = await post(backend, loadFixture(), JSON_HEADERS, undefined, method);
-    expect(response.status).toBe(202);
-    expect(await storedSpans(backend)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ requestId: "fixture-req-001", spanType: "generation" }),
-        expect.objectContaining({ parentSpanId: "a44772891b0e7515", spanType: "span" }),
-      ]),
-    );
-    expect(await backend.query(api.queries.getCorrelationProjectionCoverage, {})).toEqual({
-      state: "ready",
-      processedSpans: 0,
-    });
-  });
+  it.each(["POST", "PUT"] as const)(
+    "ingests and archives a real fixture over %s",
+    async (method) => {
+      const backend = createBackend();
+      const storage = memoryStorage();
+      const fixture = loadFixture();
+      const original = parseOpenRouterOtlpDelivery(JSON.parse(fixture));
+      const response = await post(backend, fixture, JSON_HEADERS, storage.adapter, method);
+      expect(response.status).toBe(202);
+      const rows = await storedSpans(backend);
+      expect(rows).toHaveLength(2);
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ requestId: "fixture-req-001", spanType: "generation" }),
+          expect.objectContaining({ parentSpanId: "a44772891b0e7515", spanType: "span" }),
+        ]),
+      );
+      expect(storage.objects.size).toBe(rows.length);
+
+      for (const { _id: spanDocumentId } of rows) {
+        const row = await backend.query(api.queries.getSpan, { spanDocumentId });
+        if (!row?.payload) throw new Error("expected a span with a payload reference");
+        for (const field of ["input", "output", "attributes", "resourceAttributes"]) {
+          expect(row).not.toHaveProperty(field);
+        }
+        const { key, sha256, byteLength } = row.payload;
+        expect(key).toBe(`test/spans/${row.traceId}/${row.spanId}/${sha256}.json`);
+        const object = storage.objects.get(key);
+        if (!object) throw new Error("expected an archived object");
+        expect(object).toMatchObject({
+          key,
+          sha256,
+          byteLength,
+          kind: "trace_blob",
+          contentType: "application/json",
+          encoding: "utf8",
+        });
+        expect(object.bytes.byteLength).toBe(byteLength);
+        expect(createHash("sha256").update(object.bytes).digest("hex")).toBe(sha256);
+        const expected = original.find(
+          (span) => span.traceId === row.traceId && span.spanId === row.spanId,
+        );
+        if (!expected) throw new Error("expected a matching fixture span");
+        const full = await loadFullSpan(storage.reader, row, { maxBytes: byteLength });
+        expect(full).toMatchObject({ attributes: expected.attributes });
+        expect(full?.input).toBe(expected.input);
+        expect(full?.output).toBe(expected.output);
+      }
+    },
+  );
 
   it("deduplicates sequential and concurrent redelivery", async () => {
     const backend = createBackend();
     const rawBody = loadFixture();
     expect((await post(backend, rawBody)).status).toBe(202);
     expect((await post(backend, rawBody)).status).toBe(204);
+    expect(await storedSpans(backend)).toHaveLength(2);
 
     const freshBackend = createBackend();
-    const writes: TraceBlobPut[] = [];
-    const storage = { put: async (object: TraceBlobPut) => void writes.push(object) };
-    const results = await Promise.all([
-      post(freshBackend, rawBody, JSON_HEADERS, storage),
-      post(freshBackend, rawBody, JSON_HEADERS, storage),
-    ]);
+    const results = await Promise.all([post(freshBackend, rawBody), post(freshBackend, rawBody)]);
     expect(results.map(({ status }) => status).sort()).toEqual([202, 204]);
     expect(await storedSpans(freshBackend)).toHaveLength(2);
   });
 
   it("does not collapse distinct trace and span ID pairs", async () => {
     const backend = createBackend();
-    const body = JSON.stringify({
-      resourceSpans: [
-        {
-          scopeSpans: [
-            {
-              spans: [
-                { traceId: "a\u0000b", spanId: "c", name: "first" },
-                { traceId: "a", spanId: "b\u0000c", name: "second" },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-
+    const body = JSON.stringify(
+      envelope(
+        { traceId: "a\u0000b", spanId: "c", name: "first" },
+        { traceId: "a", spanId: "b\u0000c", name: "second" },
+      ),
+    );
     expect((await post(backend, body)).status).toBe(202);
     expect(await storedSpans(backend)).toHaveLength(2);
   });
 
   it("does not invent missing content for a privacy-redacted delivery", async () => {
     const backend = createBackend();
+    const storage = memoryStorage();
     const body = JSON.stringify(envelope({ traceId: "private", spanId: "span", name: "redacted" }));
-    expect((await post(backend, body)).status).toBe(202);
-    const spans = await storedSpans(backend);
-    expect(spans).toEqual([expect.objectContaining({ traceId: "private", spanId: "span" })]);
-    expect(spans[0]).not.toHaveProperty("input");
-    expect(spans[0]).not.toHaveProperty("output");
+    expect((await post(backend, body, JSON_HEADERS, storage.adapter)).status).toBe(202);
+    const [row] = await storedSpans(backend);
+    if (!row) throw new Error("expected a span");
+    const full = await loadFullSpan(storage.reader, row, { maxBytes: 1024 });
+    expect(full).toMatchObject({ traceId: "private", spanId: "span", attributes: [] });
+    expect(full).not.toHaveProperty("input");
+    expect(full).not.toHaveProperty("output");
   });
 
-  it("returns compact complete correlation pages and a separate full-span export", async () => {
+  it.each([
+    { kind: "request", requestId: "fixture-request" },
+    { kind: "run", runId: "fixture-run" },
+    { kind: "job", jobId: "fixture-job" },
+  ] as const)("pages $kind correlations completely across tied timestamps", async (correlation) => {
+    vi.useFakeTimers();
     const backend = createBackend();
-    const root = parseOpenRouterOtlpDelivery(JSON.parse(loadFixture()))[0];
-    if (!root) throw new Error("fixture must contain a root span");
-    const largeContent = "x".repeat(400_000);
-    const hostileMetadata = "\u0000\n\t😀".repeat(200);
-    await backend.run(async (ctx) => {
-      for (let index = 0; index < 8; index += 1) {
-        await ctx.db.insert("spans", {
-          ...root,
-          traceId: "correlated-trace",
-          spanId: `span-${index}-${hostileMetadata}`,
-          parentSpanId: hostileMetadata,
-          name: hostileMetadata,
-          serviceName: hostileMetadata,
-          runId: hostileMetadata,
-          jobId: hostileMetadata,
-          rootExecutionId: hostileMetadata,
-          opencodeSessionId: hostileMetadata,
-          entityType: "record",
-          entityId: "record-123",
-          traceName: hostileMetadata,
-          spanType: hostileMetadata,
-          requestModel: hostileMetadata,
-          responseModel: hostileMetadata,
-          providerName: hostileMetadata,
-          finishReason: hostileMetadata,
-          input: largeContent,
-          output: largeContent,
-          receivedAt: 100,
-        });
-      }
-    });
+    const attributes = [
+      { key: "trace.metadata.request_id", value: { stringValue: "fixture-request" } },
+      { key: "trace.metadata.run_id", value: { stringValue: "fixture-run" } },
+      { key: "trace.metadata.job_id", value: { stringValue: "fixture-job" } },
+    ];
+    const name = "\u0000\n\t😀".repeat(200);
+    for (let batch = 0; batch < 2; batch += 1) {
+      vi.setSystemTime(100 + batch);
+      const spans = Array.from({ length: 4 }, (_, index) => ({
+        traceId: "correlated-trace",
+        spanId: `span-${batch * 4 + index}`,
+        name,
+        attributes,
+      }));
+      expect((await post(backend, JSON.stringify(envelope(...spans)))).status).toBe(202);
+    }
+    expect(
+      (
+        await post(
+          backend,
+          JSON.stringify(
+            envelope({
+              traceId: "correlated-trace",
+              spanId: "unrelated",
+              name: "unrelated",
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(202);
 
-    const summaries: Array<{ spanDocumentId: string; input?: string; output?: string }> = [];
-    const pageSizes: number[] = [];
-    let cursor: { receivedAt: number; _creationTime: number } | undefined;
-    while (true) {
+    const spanIds: string[] = [];
+    let cursor: SpanCursor | undefined;
+    for (let index = 0; index < 3; index += 1) {
       const result = await backend.query(api.queries.pageCorrelationSummaries, {
-        correlation: { kind: "request", requestId: root.requestId ?? "" },
+        correlation,
+        limit: 3,
         cursor,
       });
-      expect(result.status).toBe("ready");
-      if (result.status !== "ready") throw new Error("request projection must be ready");
+      expect(result.page).toHaveLength(index === 2 ? 2 : 3);
+      expect(result.done).toBe(index === 2);
       expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(
         32 * 1024,
       );
-      expect(result.page.length).toBeGreaterThan(0);
-      pageSizes.push(result.page.length);
-      summaries.push(...result.page);
-      if (result.done) break;
+      for (const span of result.page) {
+        expect(span.name).toBe(name.slice(0, 128));
+        expect(span.truncatedFields).toContain("name");
+        spanIds.push(span.spanId);
+      }
+      const last = result.page.at(-1);
+      expect(result.cursor).toEqual(
+        result.done
+          ? undefined
+          : {
+              receivedAt: last?.receivedAt,
+              _creationTime: last?.creationTime,
+            },
+      );
       cursor = result.cursor;
     }
-    expect(summaries).toHaveLength(8);
-    expect(pageSizes[0]).toBeLessThan(7);
-    expect(summaries[0]).not.toHaveProperty("input");
-    expect(summaries[0]).not.toHaveProperty("output");
-    expect(summaries[0]).toMatchObject({ inputUtf8Bytes: 400_000, outputUtf8Bytes: 400_000 });
-
-    const first = summaries[0];
-    if (!first) throw new Error("summary must provide a full-span reference");
-    const full = await backend.query(api.queries.exportFullSpan, {
-      spanDocumentId: first.spanDocumentId as never,
-    });
-    expect(full?.input).toHaveLength(400_000);
-    expect(full?.output).toHaveLength(400_000);
-
-    const userResult = await backend.query(api.queries.pageCorrelationSummaries, {
-      correlation: { kind: "user", userId: root.userId ?? "" },
-      limit: 1,
-    });
-    expect(userResult).toMatchObject({
-      status: "ready",
-      page: [{ spanDocumentId: expect.any(String) }],
-    });
-
-    await expect(backend.query(api.queries.pageRecentSummaries, { limit: 8 })).rejects.toThrow(
-      "limit must be a positive integer no greater than 7",
-    );
+    expect(spanIds).toEqual(Array.from({ length: 8 }, (_, index) => `span-${7 - index}`));
+    await expect(
+      backend.query(api.queries.pageCorrelationSummaries, { correlation, limit: 26 }),
+    ).rejects.toThrow("limit must be a positive integer no greater than 25");
   });
 
-  it("projects the reasoning and cached-input counts spans store into every summary page", async () => {
+  it("summarizes usage, cost, and content bytes from slim facts", async () => {
     const backend = createBackend();
     const fixture = loadFixture("003-reasoning-luna.json");
     const traceId = "b633b7fd35845c40143e92b76c02a978";
-    // The fixture's generation records both counts as 0. A copy on another trace records a
-    // generation that reasoned and read cached input.
-    const countedTraceId = "c633b7fd35845c40143e92b76c02a978";
-    const counted = JSON.parse(fixture.replaceAll(traceId, countedTraceId)) as {
-      resourceSpans: Array<{
-        scopeSpans: Array<{
-          spans: Array<{ attributes?: Array<{ key: string; value: unknown }> }>;
-        }>;
-      }>;
-    };
-    const values: Record<string, number> = {
-      "gen_ai.usage.output_tokens.reasoning": 4,
-      "gen_ai.usage.input_tokens.cached": 12,
-    };
-    for (const { scopeSpans } of counted.resourceSpans)
-      for (const { spans } of scopeSpans)
-        for (const { attributes = [] } of spans)
-          for (const attribute of attributes)
-            if (attribute.key in values) attribute.value = { intValue: values[attribute.key] };
-    expect((await post(backend, fixture)).status).toBe(202);
-    expect((await post(backend, JSON.stringify(counted))).status).toBe(202);
-
-    type Summary = {
-      traceId: string;
-      name: string;
-      reasoningTokens?: number;
-      cachedInputTokens?: number;
-    };
-    const counts = (page: Summary[]) =>
-      Object.fromEntries(
-        page
-          .filter((summary) => summary.name === "fixture-reasoning")
-          .map((summary) => [
-            summary.traceId,
-            [summary.reasoningTokens, summary.cachedInputTokens],
-          ]),
-      );
-    const expected = { [traceId]: [0, 0], [countedTraceId]: [4, 12] };
-    const trace = async (id: string) =>
-      (await backend.query(api.queries.pageTraceSummaries, { traceId: id })).page;
-    expect(counts([...(await trace(traceId)), ...(await trace(countedTraceId))])).toEqual(expected);
-    const byRequest = await backend.query(api.queries.pageCorrelationSummaries, {
-      correlation: { kind: "request", requestId: "fixture-req-003" },
-    });
-    if (byRequest.status !== "ready") throw new Error("request projection must be ready");
-    expect(counts(byRequest.page)).toEqual(expected);
-    expect(counts((await backend.query(api.queries.pageRecentSummaries, {})).page)).toEqual(
-      expected,
-    );
-    // The provider attempt span records neither count, so its summary has neither, never 0.
-    const attempt = (await trace(traceId)).find((summary) => summary.name !== "fixture-reasoning");
-    expect(attempt).toBeDefined();
-    expect(attempt).not.toHaveProperty("reasoningTokens");
-    expect(attempt).not.toHaveProperty("cachedInputTokens");
-  });
-
-  it("carries cache writes and BYOK inference cost into summaries", async () => {
-    const backend = createBackend();
-    const fixture = loadFixture("003-reasoning-luna.json");
-    const traceId = "b633b7fd35845c40143e92b76c02a978";
-    // A BYOK generation that wrote the prompt cache, recorded as OpenRouter reports it today.
     const byokTraceId = "d633b7fd35845c40143e92b76c02a978";
     const byok = JSON.parse(fixture.replaceAll(traceId, byokTraceId)) as {
       resourceSpans: Array<{
@@ -452,385 +389,113 @@ describe("OpenRouter observability component", () => {
         }>;
       }>;
     };
+    const input = '{"messages":[{"role":"user","content":"café"}]}';
+    const output = '{"completion":"🌕"}';
+    const overrides: Record<string, unknown> = {
+      "trace.input": { stringValue: input },
+      "span.input": { stringValue: input },
+      "gen_ai.prompt": { stringValue: input },
+      "trace.output": { stringValue: output },
+      "span.output": { stringValue: output },
+      "gen_ai.completion": { stringValue: output },
+      "gen_ai.usage.output_tokens.reasoning": { intValue: 4 },
+      "gen_ai.usage.input_tokens.cached": { intValue: 12 },
+    };
+    const added = [
+      { key: "gen_ai.usage.input_tokens.cache_write", value: { intValue: 759 } },
+      { key: "trace.metadata.openrouter_generation.cache_write_tokens", value: { intValue: 759 } },
+      { key: "trace.metadata.openrouter_generation.is_byok", value: { boolValue: true } },
+      {
+        key: "trace.metadata.openrouter_generation.byok_usage_inference",
+        value: { doubleValue: 0.0003885 },
+      },
+    ];
     for (const { scopeSpans } of byok.resourceSpans)
       for (const { spans } of scopeSpans)
         for (const span of spans)
-          if (span.name === "fixture-reasoning")
+          if (span.name === "fixture-reasoning") {
             span.attributes = [
-              ...(span.attributes ?? []),
-              { key: "gen_ai.usage.input_tokens.cache_write", value: { intValue: 759 } },
-              {
-                key: "trace.metadata.openrouter_generation.cache_write_tokens",
-                value: { intValue: 759 },
-              },
-              { key: "trace.metadata.openrouter_generation.is_byok", value: { boolValue: true } },
-              {
-                key: "trace.metadata.openrouter_generation.byok_usage_inference",
-                value: { doubleValue: 0.0003885 },
-              },
+              ...(span.attributes ?? []).filter(({ key }) => !(key in overrides)),
+              ...Object.entries(overrides).map(([key, value]) => ({ key, value })),
+              ...added,
             ];
+          }
     expect((await post(backend, fixture)).status).toBe(202);
     expect((await post(backend, JSON.stringify(byok))).status).toBe(202);
 
-    const generation = async (id: string) =>
-      (await backend.query(api.queries.pageTraceSummaries, { traceId: id })).page.find(
-        (summary) => summary.name === "fixture-reasoning",
-      );
-    expect(await generation(byokTraceId)).toMatchObject({
+    const { page } = await backend.query(api.queries.pageCorrelationSummaries, {
+      correlation: { kind: "request", requestId: "fixture-req-003" },
+    });
+    const counted = page.find(
+      (span) => span.traceId === byokTraceId && span.name === "fixture-reasoning",
+    );
+    if (!counted) throw new Error("expected the BYOK generation summary");
+    const facts = {
+      reasoningTokens: 4,
+      cachedInputTokens: 12,
       cacheCreationInputTokens: 759,
       isByok: true,
       byokInferenceUsageCost: 0.0003885,
+      inputUtf8Bytes: Buffer.byteLength(input),
+      outputUtf8Bytes: Buffer.byteLength(output),
+    };
+    expect(counted).toMatchObject(facts);
+    const row = await backend.query(api.queries.getSpan, {
+      spanDocumentId: counted.spanDocumentId,
     });
-    // A span that recorded none of them has none, never 0 or false.
-    const plain = await generation(traceId);
-    expect(plain).toBeDefined();
+    expect(row).toMatchObject(facts);
+    for (const field of ["input", "output", "attributes"]) {
+      expect(row).not.toHaveProperty(field);
+      expect(counted).not.toHaveProperty(field);
+    }
+    const plain = page.find(
+      (span) => span.traceId === traceId && span.name === "fixture-reasoning",
+    );
+    expect(plain).toMatchObject({ reasoningTokens: 0, cachedInputTokens: 0 });
     expect(plain).not.toHaveProperty("cacheCreationInputTokens");
     expect(plain).not.toHaveProperty("isByok");
     expect(plain).not.toHaveProperty("byokInferenceUsageCost");
   });
 
-  it.each([
-    ["empty", 0],
-    ["exact page", 6],
-    ["more than the former cap", 9],
-    ["maximum realistic trace", 64],
-  ])("exhausts an %s trace without ambiguity", async (_name, spanCount) => {
+  it("summarizes a legacy inline row and loads it unchanged without storage", async () => {
     const backend = createBackend();
-    await backend.run(async (ctx) => {
-      for (let index = 0; index < spanCount; index += 1) {
+    const input = '{"prompt":"café"}';
+    const output = '{"completion":"🌕"}';
+    const spanDocumentId = await backend.run(
+      async (ctx) =>
         await ctx.db.insert("spans", {
-          traceId: "paged-trace",
-          spanId: `span-${index.toString().padStart(3, "0")}`,
-          name: "paged",
-          attributes: [],
-          resourceAttributes: [],
-          receivedAt: 1,
-        });
-      }
-    });
-
-    const spanIds: string[] = [];
-    let cursor: string | undefined;
-    let pages = 0;
-    while (true) {
-      const result = await backend.query(api.queries.pageTraceSummaries, {
-        traceId: "paged-trace",
-        limit: 6,
-        cursor: cursor as never,
-      });
-      pages += 1;
-      spanIds.push(...result.page.map((span) => span.spanId));
-      if (result.done) {
-        expect(result.cursor).toBeUndefined();
-        break;
-      }
-      expect(result.cursor).toBe(result.page.at(-1)?.spanDocumentId);
-      cursor = result.cursor;
-    }
-
-    expect(spanIds).toEqual(
-      Array.from({ length: spanCount }, (_, index) => `span-${index.toString().padStart(3, "0")}`),
-    );
-    expect(pages).toBe(Math.max(1, Math.ceil(spanCount / 6)));
-  });
-
-  it("backfills fixed correlation projections before indexed queries become ready", async () => {
-    vi.useFakeTimers();
-    const backend = createBackend();
-    await backend.run(async (ctx) => {
-      await ctx.db.insert("migrationState", {
-        name: "prismantix-spans-v1",
-        startedAt: 1,
-        completedAt: 1,
-      });
-      for (let index = 0; index < 3; index += 1) {
-        await ctx.db.insert("spans", {
-          traceId: "legacy",
-          spanId: `span-${index}`,
+          traceId: "legacy-trace",
+          spanId: "legacy-span",
+          requestId: "legacy-request",
           name: "legacy",
-          attributes: [{ key: "trace.metadata.job_id", valueJson: '{"stringValue":"job-123"}' }],
-          resourceAttributes: [],
-          receivedAt: index,
-        });
-      }
-    });
-
-    await expect(
-      backend.query(api.queries.pageCorrelationSummaries, {
-        correlation: { kind: "job", jobId: "job-123" },
-      }),
-    ).resolves.toMatchObject({ status: "not_ready", coverage: { state: "not_started" } });
-
-    await expect(backend.mutation(api.ingest.admitPrepared, { spans: [] })).resolves.toMatchObject({
-      kind: "accepted",
-    });
-    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-    expect(await backend.query(api.queries.getCorrelationProjectionCoverage, {})).toEqual({
-      state: "ready",
-      processedSpans: 3,
-    });
-    const result = await backend.query(api.queries.pageCorrelationSummaries, {
-      correlation: { kind: "job", jobId: "job-123" },
-    });
-    expect(result).toMatchObject({ status: "ready", done: true });
-    if (result.status !== "ready") throw new Error("backfill must make the index ready");
-    expect(result.page).toHaveLength(3);
-    expect(await storedSpans(backend)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ jobId: "job-123", attributes: [] })]),
+          receivedAt: 100,
+          input,
+          output,
+          attributes: [
+            { key: "gen_ai.usage.input_tokens.cache_write", valueJson: '{"intValue":7}' },
+          ],
+          resourceAttributes: [{ key: "resource", valueJson: '{"stringValue":"legacy"}' }],
+        }),
     );
-  });
-
-  it("deletes expired rows across bounded retention batches", async () => {
-    vi.useFakeTimers();
-    const backend = createBackend();
-    await backend.run(async (ctx) => {
-      for (let index = 0; index < 257; index += 1) {
-        const spanDocumentId = await ctx.db.insert("spans", {
-          traceId: `expired-trace-${index}`,
-          spanId: `expired-span-${index}`,
-          name: "expired",
-          attributes: [],
-          resourceAttributes: [],
-          receivedAt: 1,
-        });
-        await ctx.db.insert("spanKeys", {
-          traceId: `expired-trace-${index}`,
-          spanId: `expired-span-${index}`,
-          spanDocumentId,
-        });
-      }
-      const spanDocumentId = await ctx.db.insert("spans", {
-        traceId: "current-trace",
-        spanId: "current-span",
-        name: "current",
-        attributes: [],
-        resourceAttributes: [],
-        receivedAt: 10_000,
-      });
-      await ctx.db.insert("spanKeys", {
-        traceId: "current-trace",
-        spanId: "current-span",
+    const { page } = await backend.query(api.queries.pageCorrelationSummaries, {
+      correlation: { kind: "request", requestId: "legacy-request" },
+    });
+    expect(page).toEqual([
+      expect.objectContaining({
         spanDocumentId,
-      });
-    });
-
-    expect(await backend.mutation(internal.retention.deleteExpired, { cutoff: 5_000 })).toEqual({
-      deletedSpans: 8,
-    });
-    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-    expect((await storedSpans(backend)).map((span) => span.spanId)).toEqual(["current-span"]);
-    expect(await backend.run(async (ctx) => await ctx.db.query("spanKeys").collect())).toHaveLength(
-      1,
-    );
-  });
-
-  it("keeps aged spans indefinitely while migrations and backfills complete", async () => {
-    vi.useFakeTimers();
-    process.env.RETENTION_DAYS = "indefinite";
-    const backend = createBackend();
-    await backend.run(async (ctx) => {
-      for (let index = 0; index < 9; index += 1) {
-        await ctx.db.insert("spans", {
-          traceId: "legacy",
-          spanId: `span-${index}`,
-          name: "legacy",
-          attributes: [{ key: "trace.metadata.job_id", valueJson: '{"stringValue":"job-123"}' }],
-          receivedAt: 1,
-        });
-        await ctx.db.insert("deliveries", { byteLength: 2, rawBody: "{}", receivedAt: 1 });
-      }
-    });
-
-    await backend.mutation(internal.retention.start, {});
-    const scheduled = await backend.run(async (ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
-    );
-    expect(scheduled.map(({ name }) => name)).not.toEqual(
-      expect.arrayContaining([expect.stringContaining("retention:deleteExpired")]),
-    );
-    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-
-    const spans = await storedSpans(backend);
-    expect(spans).toHaveLength(9);
-    for (const span of spans) {
-      expect(span).toMatchObject({ resourceAttributes: [], jobId: "job-123", attributes: [] });
-    }
-    expect(await backend.run(async (ctx) => ctx.db.query("spanKeys").collect())).toHaveLength(9);
-    expect(await backend.run(async (ctx) => ctx.db.query("deliveries").collect())).toHaveLength(0);
-    expect(await backend.query(api.queries.getCorrelationProjectionCoverage, {})).toEqual({
-      state: "ready",
-      processedSpans: 9,
-    });
-    const migrations = await backend.run(async (ctx) => ctx.db.query("migrationState").collect());
-    expect(migrations).toHaveLength(3);
-    for (const migration of migrations) expect(migration.completedAt).toBeDefined();
-  });
-
-  it("stops an already queued cleanup continuation after switching to indefinite", async () => {
-    vi.useFakeTimers();
-    process.env.RETENTION_DAYS = "1";
-    const backend = createBackend();
-    await backend.run(async (ctx) => {
-      for (let index = 0; index < 24; index += 1) {
-        const spanDocumentId = await ctx.db.insert("spans", {
-          traceId: "expired",
-          spanId: `span-${index}`,
-          name: "expired",
-          attributes: [],
-          resourceAttributes: [],
-          receivedAt: 1,
-        });
-        await ctx.db.insert("spanKeys", {
-          traceId: "expired",
-          spanId: `span-${index}`,
-          spanDocumentId,
-        });
-      }
-    });
-    expect(await backend.mutation(internal.retention.deleteExpired, { cutoff: 5_000 })).toEqual({
-      deletedSpans: 8,
-    });
-    const remaining = await storedSpans(backend);
-    const keys = await backend.run(async (ctx) => ctx.db.query("spanKeys").collect());
-    const queued = await backend.run(async (ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
-    );
-    expect(queued).toHaveLength(1);
-    expect(queued[0].state.kind).toBe("pending");
-
-    process.env.RETENTION_DAYS = "indefinite";
-    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-    expect(await storedSpans(backend)).toEqual(remaining);
-    expect(await backend.run(async (ctx) => ctx.db.query("spanKeys").collect())).toEqual(keys);
-    const finished = await backend.run(async (ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
-    );
-    expect(finished).toHaveLength(1);
-    expect(finished[0]).toMatchObject({ _id: queued[0]._id, state: { kind: "success" } });
-    expect(await backend.mutation(internal.retention.deleteExpired, { cutoff: 5_000 })).toEqual({
-      deletedSpans: 0,
-    });
-  });
-
-  it.each([
-    [undefined, 30],
-    ["1", 1],
-    ["3650", 3650],
-  ] as const)(
-    "uses the expected numeric cutoff for RETENTION_DAYS=%s",
-    async (configured, days) => {
-      vi.useFakeTimers();
-      if (configured !== undefined) process.env.RETENTION_DAYS = configured;
-      const backend = createBackend();
-      const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-      await backend.run(async (ctx) => {
-        for (const [spanId, receivedAt] of [
-          ["expired", cutoff - 1],
-          ["boundary", cutoff],
-          ["current", Date.now()],
-        ] as const) {
-          await ctx.db.insert("spans", {
-            traceId: "retention",
-            spanId,
-            name: spanId,
-            attributes: [],
-            resourceAttributes: [],
-            receivedAt,
-          });
-        }
-      });
-      await backend.mutation(internal.retention.start, {});
-      await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-      expect((await storedSpans(backend)).map(({ spanId }) => spanId).sort()).toEqual([
-        "boundary",
-        "current",
-      ]);
-    },
-  );
-
-  it("migrates legacy spans and removes legacy raw deliveries in bounded batches", async () => {
-    vi.useFakeTimers();
-    const backend = createBackend();
-    await backend.run(async (ctx) => {
-      const stale = Date.now() - 6 * 60 * 1000;
-      await ctx.db.insert("migrationState", {
-        name: "prismantix-spans-v1",
-        startedAt: stale,
-        lastScheduledAt: stale,
-      });
-      for (let index = 0; index < 3; index += 1) {
-        await ctx.db.insert("spans", {
-          traceId: `legacy-trace-${index}`,
-          spanId: `legacy-span-${index}`,
-          name: "legacy",
-          attributes: [],
-          receivedAt: index,
-        });
-        await ctx.db.insert("deliveries", {
-          byteLength: 2,
-          rawBody: "{}",
-          receivedAt: index,
-        });
-      }
-    });
-
-    const duplicateResponse = await post(
-      backend,
-      JSON.stringify(
-        envelope({ traceId: "legacy-trace-0", spanId: "legacy-span-0", name: "legacy" }),
-      ),
-    );
-    expect(duplicateResponse.status).toBe(503);
-    expect(await storedSpans(backend)).toHaveLength(3);
-
-    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-    expect(
-      await post(
-        backend,
-        JSON.stringify(
-          envelope({ traceId: "legacy-trace-0", spanId: "legacy-span-0", name: "legacy" }),
-        ),
-      ),
-    ).toHaveProperty("status", 204);
-    expect(await backend.mutation(internal.retention.deleteLegacyDeliveries, {})).toEqual({
-      deletedDeliveries: 2,
-    });
-    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-
-    expect(await storedSpans(backend)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ resourceAttributes: [] }),
-        expect.objectContaining({ resourceAttributes: [] }),
-        expect.objectContaining({ resourceAttributes: [] }),
-      ]),
-    );
-    expect(await backend.run(async (ctx) => await ctx.db.query("spanKeys").collect())).toHaveLength(
-      3,
-    );
-    expect(
-      await backend.run(async (ctx) => await ctx.db.query("deliveries").collect()),
-    ).toHaveLength(0);
-    expect(
-      await backend.run(async (ctx) =>
-        (await ctx.db.query("migrationState").collect()).map(({ name }) => name).sort(),
-      ),
-    ).toEqual(["correlation-projections-v1", "prismantix-deliveries-v1", "prismantix-spans-v1"]);
-
-    await backend.run(async (ctx) => {
-      await ctx.db.insert("spans", {
-        traceId: "post-migration-trace",
-        spanId: "post-migration-span",
-        name: "post-migration",
-        attributes: [],
-        receivedAt: Date.now(),
-      });
-    });
-    await backend.mutation(internal.retention.start, {});
-    await backend.finishAllScheduledFunctions(() => vi.runAllTimers());
-    const postMigrationSpans = await storedSpans(backend);
-    expect(postMigrationSpans).toEqual([
-      expect.objectContaining({ spanId: "post-migration-span" }),
+        inputUtf8Bytes: Buffer.byteLength(input),
+        outputUtf8Bytes: Buffer.byteLength(output),
+        attributeCount: 1,
+        resourceAttributeCount: 1,
+        cacheCreationInputTokens: 7,
+      }),
     ]);
-    expect(postMigrationSpans[0]).not.toHaveProperty("resourceAttributes");
+    const row = await backend.query(api.queries.getSpan, { spanDocumentId });
+    if (!row) throw new Error("expected the legacy row");
+    expect(row).toMatchObject({ input, output });
+    expect(row).not.toHaveProperty("payload");
+    const reader = { get: vi.fn(async () => null) };
+    expect(await loadFullSpan(reader, row, { maxBytes: 1024 })).toEqual(row);
+    expect(reader.get).not.toHaveBeenCalled();
   });
 });

@@ -44,6 +44,7 @@ export {
   handleOpenRouterTraceRequest,
   readBoundedTraceBody,
   type OpenRouterTraceHandlerOptions,
+  type StoredSpan,
 } from "./ingestion.js";
 
 export {
@@ -78,6 +79,11 @@ export class OpenRouterObservability {
     args: SummaryPageOptions & { correlation: SpanCorrelation },
   ) {
     return ctx.runQuery(this.component.queries.pageCorrelationSummaries, args);
+  }
+
+  /** Stored rows in creation order, for reconciling a downstream copy. */
+  pageStoredSince(ctx: ReadContext, args: { after?: number; before?: number; limit?: number }) {
+    return ctx.runQuery(this.component.queries.pageStoredSince, args);
   }
 
   /** The stored row; pass it to `loadFullSpan` in an action for its content. */

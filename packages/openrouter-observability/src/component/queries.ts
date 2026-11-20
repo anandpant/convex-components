@@ -202,3 +202,40 @@ export const getSpan = query({
   args: { spanDocumentId: v.id("spans") },
   handler: async (ctx, args) => await ctx.db.get("spans", args.spanDocumentId),
 });
+
+/**
+ * Stored rows in creation order after `after`, for a host that reconciles a downstream copy.
+ * Rows are slim, so a page of 200 reads about 200 KB; rows still holding inline content are
+ * returned without it.
+ */
+export const pageStoredSince = query({
+  args: {
+    after: v.optional(v.number()),
+    before: v.optional(v.number()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = boundedLimit(args.limit, 200);
+    const rows = await ctx.db
+      .query("spans")
+      .withIndex("by_creation_time", (q) => {
+        const lower = args.after === undefined ? q : q.gt("_creationTime", args.after);
+        return args.before === undefined ? lower : lower.lt("_creationTime", args.before);
+      })
+      .take(limit + 1);
+    const page = rows.slice(0, limit).map((row) => ({
+      spanDocumentId: row._id,
+      creationTime: row._creationTime,
+      receivedAt: row.receivedAt,
+      traceId: row.traceId,
+      spanId: row.spanId,
+      payload: row.payload,
+      variants: row.variants ?? [],
+    }));
+    return {
+      page,
+      cursor: page.length === 0 ? args.after : page[page.length - 1]?.creationTime,
+      done: rows.length <= limit,
+    };
+  },
+});

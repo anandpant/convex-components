@@ -17,7 +17,17 @@ import {
   OtlpBoundExceededError,
   parseOpenRouterOtlpDelivery,
 } from "./component/parser.js";
-import { archiveSpan } from "./spanArchive.js";
+import { archiveSpan, type SlimSpan } from "./spanArchive.js";
+import type { ParsedOpenRouterSpan } from "./component/parser.js";
+
+/** A span the component stored, with the content its archived object holds. */
+export type StoredSpan = {
+  spanDocumentId: string;
+  kind: "span" | "variant";
+  receivedAt: number;
+  row: SlimSpan;
+  span: ParsedOpenRouterSpan;
+};
 
 type ActionContext = Pick<GenericActionCtx<GenericDataModel>, "runMutation">;
 const BEARER_PREFIX = "Bearer ";
@@ -30,6 +40,12 @@ export type OpenRouterTraceHandlerOptions = {
   blobPrefix?: string;
   /** Key prefix for each span's archived content object. */
   spanPrefix?: string;
+  /**
+   * Called after admission with every span the component stored: a new row or a new variant,
+   * with its full prepared content. A failure here is logged and does not fail the delivery:
+   * the archived object is already the durable copy.
+   */
+  onStored?: (stored: ReadonlyArray<StoredSpan>) => Promise<void>;
   limits?: TraceBlobLimits;
   mapRemoteUrl?: RemoteTraceBlobMapper;
 };
@@ -237,11 +253,34 @@ export async function handleOpenRouterTraceRequest(
       return new Response(null, { status: 204 });
     }
     for (const object of prepared.planned) await options.blobStorage.put(object);
-    const spans = [];
+    const spans: SlimSpan[] = [];
     for (const span of prepared.spans) {
       spans.push(await archiveSpan(span, options.blobStorage, options.spanPrefix));
     }
     const admission = await ctx.runMutation(options.component.ingest.admitPrepared, { spans });
+    if (options.onStored && admission.stored.length > 0) {
+      const byDigest = new Map(spans.map((row, index) => [row.payload.sha256, index]));
+      const stored = admission.stored.flatMap((entry) => {
+        const index = byDigest.get(entry.sha256);
+        if (index === undefined) return [];
+        const row = spans[index] as SlimSpan;
+        const span = prepared.spans[index] as ParsedOpenRouterSpan;
+        return [
+          {
+            spanDocumentId: entry.spanDocumentId,
+            kind: entry.kind,
+            receivedAt: entry.receivedAt,
+            row,
+            span,
+          },
+        ];
+      });
+      try {
+        await options.onStored(stored);
+      } catch (error) {
+        console.error("OpenRouter stored-span hook failed", error);
+      }
+    }
     return responseForAdmission(admission);
   } catch (error) {
     if (

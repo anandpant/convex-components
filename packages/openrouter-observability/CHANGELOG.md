@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- `handleOpenRouterTraceRequest` takes an optional `onStored` hook. After admission it receives every span the component stored, as a new row or a new variant, with its full prepared content, so a host can forward it downstream without reading the archived object back. A hook failure is logged and never fails the delivery.
+- `admitPrepared` also returns `stored`: the row id, trace and span ids, content digest, receipt time and kind of each stored span.
+- `pageStoredSince` (client `pageStoredSince`) pages stored rows in creation order, 200 at most per page, for reconciling a downstream copy.
+
 ## 0.5.0
 
 - Each span is stored as a slim row plus one archived object holding its full content. The host handler writes the object through the existing `TraceBlobStorage` at `<spanPrefix>/<traceId>/<spanId>/<sha256>.json` (new `spanPrefix` option), then admits the row. Rows record the object's key, digest and length in `payload`, with content byte counts, attribute counts and cache-write tokens precomputed, so listing never reads content.

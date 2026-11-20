@@ -101,7 +101,7 @@ Each admitted span has a slim row and one archived object. The object is the pre
 - `pageCorrelationSummaries` lists spans by indexed request, run, or job, newest first.
 - `getSpan` returns one stored row by the `spanDocumentId` from a summary; pass it to `loadFullSpan` for content.
 
-Every page returns `cursor` and `done` and emits at most 25 summaries. Summary strings are clipped to 128 characters and named in `truncatedFields`. The serialized page stays at or below 32 KiB and advances its cursor from the last emitted row when the byte limit shortens a page.
+Every page returns `cursor` and `done` and emits at most 7 summaries. Summary strings are clipped to 128 characters and named in `truncatedFields`. The serialized page stays at or below 32 KiB and advances its cursor from the last emitted row when the byte limit shortens a page.
 
 Each summary carries the provider-native token counts its span recorded: `inputTokens`, `outputTokens`, `totalTokens`, `reasoningTokens`, `cachedInputTokens` (cache reads), and `cacheCreationInputTokens` (cache writes). `inputTokens` already includes both cache counts. Cache writes are read from the span's stored `gen_ai.usage.input_tokens.cache_write` attribute, so spans stored before summaries carried them report them too. A count the span did not record is absent, never 0.
 

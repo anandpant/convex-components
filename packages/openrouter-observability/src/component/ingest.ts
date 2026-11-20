@@ -1,11 +1,11 @@
 import { v } from "convex/values";
 import { mutation } from "./_generated/server.js";
-import { slimSpan } from "./spanValues.js";
+import { MAX_SPAN_VARIANTS, slimSpan } from "./spanValues.js";
 
 /**
- * Admit slim span rows whose content the host has already archived. A span seen before, in
- * this delivery or an earlier one, is skipped: its archived object is content-addressed, so a
- * redelivery left at most an identical or unreferenced object behind.
+ * Admit slim span rows whose content the host has already archived. A span seen before keeps its
+ * row; when a redelivery's content differs, its object is recorded as a variant so no delivered
+ * content goes unreferenced.
  */
 export const admitPrepared = mutation({
   args: { spans: v.array(slimSpan) },
@@ -21,7 +21,21 @@ export const admitPrepared = mutation({
         .query("spans")
         .withIndex("by_trace_span", (q) => q.eq("traceId", span.traceId).eq("spanId", span.spanId))
         .first();
-      if (existing) continue;
+      if (existing) {
+        if (existing.payload?.sha256 === span.payload.sha256) continue;
+        const known = (existing.variants ?? []).some(
+          (variant) => variant.sha256 === span.payload.sha256,
+        );
+        if (known) continue;
+        const variantCount = (existing.variantCount ?? 0) + 1;
+        await ctx.db.patch("spans", existing._id, {
+          variantCount,
+          ...(variantCount <= MAX_SPAN_VARIANTS
+            ? { variants: [...(existing.variants ?? []), { ...span.payload, receivedAt }] }
+            : {}),
+        });
+        continue;
+      }
       await ctx.db.insert("spans", { ...span, receivedAt });
       admitted += 1;
     }

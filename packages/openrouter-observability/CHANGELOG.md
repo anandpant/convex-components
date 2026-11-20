@@ -3,8 +3,9 @@
 ## 0.5.0
 
 - Each span is stored as a slim row plus one archived object holding its full content. The host handler writes the object through the existing `TraceBlobStorage` at `<spanPrefix>/<traceId>/<spanId>/<sha256>.json` (new `spanPrefix` option), then admits the row. Rows record the object's key, digest and length in `payload`, with content byte counts, attribute counts and cache-write tokens precomputed, so listing never reads content.
+- A redelivered span whose content differs keeps the first row and records the new object in `variants` (up to 8, with `variantCount` counting all), so no delivered content goes unreferenced. Summaries carry `variantCount` and `contentBytes`, the size a full read loads.
 - `loadFullSpan(reader, row, { maxBytes })` returns a span's full content in an action and checks the object's length and digest. `archiveSpan` lets a host admit a span it prepared itself.
-- `getSpan` replaces `exportFullSpan` and returns the stored row. `pageCorrelationSummaries` keeps the request, run, and job correlations and returns up to 25 summaries per page.
+- `getSpan` replaces `exportFullSpan` and returns the stored row. `pageCorrelationSummaries` keeps the request, run, and job correlations and returns up to 7 summaries per page (raised once 0.6.0 removes inline content).
 - Removed: `pageTraceSummaries`, `pageRecentSummaries`, `getCorrelationProjectionCoverage`, the session, user, entity, root-execution and OpenCode-session correlations and their indexes, the `by_received` index, retention (`RETENTION_DAYS` and its cron), and the Prismantix and correlation migrations. Spans are kept indefinitely. Deduplication uses the span table's own `(traceId, spanId)` index instead of `spanKeys`.
 - Rows stored before 0.5.0 keep their content inline and still summarize and load. The temporary `archiveMigration` functions let a host script page those rows and mark each one archived after it has written and confirmed its object; 0.6.0 removes them with the inline form and the unused `spanKeys`, `deliveries` and `migrationState` tables.
 

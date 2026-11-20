@@ -1,11 +1,12 @@
-import { v } from "convex/values";
+import { getConvexSize, v } from "convex/values";
 import type { Doc } from "./_generated/dataModel.js";
 import { query } from "./_generated/server.js";
 import { storedCacheWriteTokens } from "./parser.js";
 
-// Rows are slim, so a page costs about a kilobyte per span. Summaries cap display strings and
-// the whole response, so response size does not follow span size either.
-const CORRELATION_PAGE_LIMIT = 25;
+// A page reads limit + 1 rows. Rows written before 0.5.0 can still hold ~900 KiB inline, so the
+// limit stays at 7 until 0.6.0 removes inline content. Summaries cap display strings and the
+// whole response, so response size does not follow span size.
+const CORRELATION_PAGE_LIMIT = 7;
 const SUMMARY_STRING_LIMIT = 128;
 const SUMMARY_PAGE_BYTE_LIMIT = 32 * 1024;
 const encoder = new TextEncoder();
@@ -43,6 +44,7 @@ function boundedString(value: string | undefined, field: string, truncatedFields
 function payloadFacts(span: Doc<"spans">) {
   if (span.payload !== undefined) {
     return {
+      contentBytes: span.payload.byteLength,
       inputUtf8Bytes: span.inputUtf8Bytes,
       outputUtf8Bytes: span.outputUtf8Bytes,
       attributeCount: span.attributeCount ?? 0,
@@ -52,6 +54,7 @@ function payloadFacts(span: Doc<"spans">) {
   }
   const attributes = span.attributes ?? [];
   return {
+    contentBytes: getConvexSize(span),
     inputUtf8Bytes: span.input === undefined ? undefined : encoder.encode(span.input).length,
     outputUtf8Bytes: span.output === undefined ? undefined : encoder.encode(span.output).length,
     attributeCount: attributes.length,
@@ -102,6 +105,9 @@ function summarize(span: Doc<"spans">) {
     outputUtf8Bytes: facts.outputUtf8Bytes,
     attributeCount: facts.attributeCount,
     resourceAttributeCount: facts.resourceAttributeCount,
+    /** Bytes a full read of this span loads: its archived object, or its inline row. */
+    contentBytes: facts.contentBytes,
+    variantCount: span.variantCount ?? 0,
     truncatedFields,
   };
 }

@@ -279,6 +279,37 @@ describe("OpenRouter observability component", () => {
     expect(await storedSpans(freshBackend)).toHaveLength(2);
   });
 
+  it("keeps every differing redelivery as a variant and skips identical ones", async () => {
+    const backend = createBackend();
+    const storage = memoryStorage();
+    const deliver = async (name: string) =>
+      (
+        await post(
+          backend,
+          JSON.stringify(envelope({ traceId: "trace", spanId: "span", name })),
+          JSON_HEADERS,
+          storage.adapter,
+        )
+      ).status;
+
+    expect(await deliver("first")).toBe(202);
+    expect(await deliver("first")).toBe(204);
+    for (let index = 0; index < 10; index++) expect(await deliver(`changed ${index}`)).toBe(204);
+    expect(await deliver("changed 0")).toBe(204);
+
+    const [row] = await storedSpans(backend);
+    if (!row?.payload) throw new Error("expected an archived span");
+    expect(row.name).toBe("first");
+    expect(row.variantCount).toBe(10);
+    expect(row.variants).toHaveLength(8);
+    for (const variant of row.variants ?? []) {
+      const object = storage.objects.get(variant.key);
+      expect(object?.sha256).toBe(variant.sha256);
+      expect(variant.sha256).not.toBe(row.payload.sha256);
+    }
+    expect(storage.objects.size).toBe(11);
+  });
+
   it("does not collapse distinct trace and span ID pairs", async () => {
     const backend = createBackend();
     const body = JSON.stringify(
@@ -373,8 +404,8 @@ describe("OpenRouter observability component", () => {
     }
     expect(spanIds).toEqual(Array.from({ length: 8 }, (_, index) => `span-${7 - index}`));
     await expect(
-      backend.query(api.queries.pageCorrelationSummaries, { correlation, limit: 26 }),
-    ).rejects.toThrow("limit must be a positive integer no greater than 25");
+      backend.query(api.queries.pageCorrelationSummaries, { correlation, limit: 8 }),
+    ).rejects.toThrow("limit must be a positive integer no greater than 7");
   });
 
   it("summarizes usage, cost, and content bytes from slim facts", async () => {

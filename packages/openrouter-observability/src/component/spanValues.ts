@@ -79,6 +79,18 @@ export const spanPayloadRef = v.object({
   byteLength: v.number(),
 });
 
+/**
+ * A later delivery of the same span whose content differed. Its object is kept and named here,
+ * never dropped; the row's `payload` stays the first content admitted.
+ */
+export const spanVariant = v.object({
+  key: v.string(),
+  sha256: v.string(),
+  byteLength: v.number(),
+  receivedAt: v.number(),
+});
+export const MAX_SPAN_VARIANTS = 8;
+
 /** Payload facts a summary needs, computed once at ingest so listing never loads content. */
 const payloadFacts = {
   inputUtf8Bytes: v.optional(v.number()),
@@ -87,9 +99,6 @@ const payloadFacts = {
   resourceAttributeCount: v.number(),
   cacheCreationInputTokens: v.optional(v.number()),
 } as const;
-
-export const parsedSpanFields = { ...scalarSpanFields, ...payloadFields } as const;
-export const parsedSpan = v.object(parsedSpanFields);
 
 export const slimSpanFields = {
   ...scalarSpanFields,
@@ -105,6 +114,9 @@ export const slimSpan = v.object(slimSpanFields);
 export const storedSpanFields = {
   ...scalarSpanFields,
   ...payloadFacts,
+  /** Up to `MAX_SPAN_VARIANTS` differing redeliveries; `variantCount` counts them all. */
+  variants: v.optional(v.array(spanVariant)),
+  variantCount: v.optional(v.number()),
   attributeCount: v.optional(v.number()),
   resourceAttributeCount: v.optional(v.number()),
   payload: v.optional(spanPayloadRef),

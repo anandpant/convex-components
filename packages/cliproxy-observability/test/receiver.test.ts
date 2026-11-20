@@ -1063,3 +1063,33 @@ it.each([
     expect(replay.scalars.outputTokens).toBe(call.outputTokens);
   },
 );
+it("coalesces routine health posts to one write a minute and writes losses and new boots at once", async () => {
+  const s = setup();
+  const at = (seconds: number) =>
+    new Date(Date.parse(healthRecord().observedAt as string) + seconds * 1000).toISOString();
+  const post = async (seconds: number, overrides: Record<string, unknown> = {}) => {
+    const response = await s.post(healthRecord({ observedAt: at(seconds), ...overrides }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ committed: true });
+  };
+  const stored = async () =>
+    (await s.backend.run((ctx) => ctx.db.query("sourceStatus").collect())).map(
+      (row) => JSON.parse(row.healthJson ?? "{}") as Record<string, unknown>,
+    );
+
+  await post(0);
+  await post(2, { observationsTotal: 40, activeCalls: 3 });
+  expect((await stored())[0]).toMatchObject({ observedAt: at(0), observationsTotal: 10 });
+
+  await post(4, { droppedObservationsTotal: 4 });
+  expect((await stored())[0]).toMatchObject({ observedAt: at(4), droppedObservationsTotal: 4 });
+
+  await post(30, { droppedObservationsTotal: 4, observationsTotal: 90 });
+  expect((await stored())[0]).toMatchObject({ observedAt: at(4) });
+  await post(64, { droppedObservationsTotal: 4, observationsTotal: 120 });
+  expect((await stored())[0]).toMatchObject({ observedAt: at(64), observationsTotal: 120 });
+
+  await post(66, { pluginBootId: "newer-boot", droppedObservationsTotal: 0 });
+  expect(await stored()).toEqual([expect.objectContaining({ pluginBootId: "newer-boot" })]);
+  expect(await s.backend.run((ctx) => ctx.db.query("bootHealth").collect())).toHaveLength(2);
+});

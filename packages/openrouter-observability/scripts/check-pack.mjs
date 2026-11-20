@@ -79,7 +79,7 @@ try {
   writeFileSync(
     join(installDirectory, "usage.ts"),
     `${readFileSync(join(packageRoot, "example/convex/convex.config.ts"), "utf8")}
-import { decodeOpenRouterInput, handleOpenRouterTraceRequest, OpenRouterObservability, resolveTraceBlob, type OpenRouterObservabilityComponent, type TraceBlobStorage } from "@shpitdev/convex-openrouter-observability";
+import { archiveSpan, decodeOpenRouterInput, handleOpenRouterTraceRequest, loadFullSpan, OpenRouterObservability, resolveTraceBlob, type OpenRouterObservabilityComponent, type ParsedOpenRouterSpan, type SpanDocumentId, type TraceBlobStorage } from "@shpitdev/convex-openrouter-observability";
 import componentTest from "@shpitdev/convex-openrouter-observability/test";
 import type { GenericActionCtx, GenericDataModel, GenericQueryCtx } from "convex/server";
 declare const component: OpenRouterObservabilityComponent;
@@ -87,10 +87,13 @@ declare const ctx: Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
 declare const actionCtx: Pick<GenericActionCtx<GenericDataModel>, "runMutation">;
 declare const request: Request;
 declare const storage: TraceBlobStorage;
+declare const span: ParsedOpenRouterSpan;
+declare const spanDocumentId: SpanDocumentId;
 const observability = new OpenRouterObservability(component);
-void observability.pageTraceSummaries(ctx, { traceId: "trace", limit: 6 });
-void observability.pageCorrelationSummaries(ctx, { correlation: { kind: "user", userId: "user" } });
-void handleOpenRouterTraceRequest(actionCtx, request, { component, bearerToken: "token", blobStorage: storage });
+void observability.pageCorrelationSummaries(ctx, { correlation: { kind: "run", runId: "run" }, limit: 7 });
+void observability.getSpan(ctx, { spanDocumentId }).then((row) => row && loadFullSpan({ get: async () => null }, row, { maxBytes: 1 }));
+void archiveSpan(span, storage, "spans");
+void handleOpenRouterTraceRequest(actionCtx, request, { component, bearerToken: "token", blobStorage: storage, spanPrefix: "spans" });
 void resolveTraceBlob({ get: async () => null }, {}, { kind: "trace_blob", key: "key", sha256: "0".repeat(64), byteLength: 1, contentType: "text/plain", encoding: "utf8" }, { maxBytes: 1 });
 void decodeOpenRouterInput('{"messages":[]}');
 void componentTest;
@@ -104,7 +107,7 @@ import helper from "@shpitdev/convex-openrouter-observability/test";
 test("loads executable component source modules", async () => {
   expect(Object.keys(helper.modules)).toContain("./component/queries.ts");
   expect(Object.keys(helper.modules).some((path) => path.endsWith(".d.ts"))).toBe(false);
-  await expect(helper.modules["./component/crons.ts"]()).resolves.toBeDefined();
+  await expect(helper.modules["./component/ingest.ts"]()).resolves.toBeDefined();
 });
 `,
   );

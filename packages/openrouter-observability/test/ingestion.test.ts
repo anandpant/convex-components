@@ -4,17 +4,19 @@ import { convexTest } from "convex-test";
 import { describe, expect, it } from "vitest";
 import {
   findTraceBlobRefs,
+  handleOpenRouterTraceRequest,
+  loadFullSpan,
   resolveTraceBlob,
   TRACE_BLOB_MARKER,
   TraceContentInvalidError,
   type TraceBlobPut,
   type TraceBlobRef,
-} from "../src/blobContent.js";
+} from "../src/client.js";
 import type { ComponentApi } from "../src/component/_generated/component.js";
 import { api } from "../src/component/_generated/api.js";
 import schema from "../src/component/schema.js";
 import { decodeOpenRouterInput, decodeOpenRouterOutput } from "../src/content.js";
-import { handleOpenRouterTraceRequest } from "../src/ingestion.js";
+import { memoryStorage } from "./memoryStorage.js";
 
 const modules = import.meta.glob("../src/component/**/*.ts");
 const TOKEN = "test-token";
@@ -66,25 +68,6 @@ function deliveryWithRawInput(rawInput: string) {
         ],
       },
     ],
-  };
-}
-
-function memoryStorage() {
-  const objects = new Map<string, TraceBlobPut>();
-  return {
-    objects,
-    adapter: {
-      put: async (object: TraceBlobPut) => {
-        objects.set(object.key, object);
-      },
-    },
-    reader: {
-      get: async (reference: TraceBlobRef, options: { maxBytes: number }) => {
-        const object = objects.get(reference.key);
-        if (!object || object.bytes.byteLength > options.maxBytes) return null;
-        return { bytes: object.bytes, contentType: object.contentType };
-      },
-    },
   };
 }
 
@@ -167,8 +150,14 @@ describe("host-owned blob ingestion", () => {
     expect(new TextEncoder().encode(rawBody).byteLength).toBeGreaterThan(900 * 1024);
 
     expect((await ingest(testBackend, rawBody, storage.adapter)).status).toBe(202);
-    const span = await onlySpan(testBackend);
-    const persisted = JSON.stringify(span);
+    const row = await onlySpan(testBackend);
+    const span = await loadFullSpan(storage.reader, row, { maxBytes: 1024 * 1024 });
+    if (!span) throw new Error("expected archived span");
+    const archived = row.payload && storage.objects.get(row.payload.key);
+    if (!archived) throw new Error("expected archived object");
+    const persisted = new TextDecoder().decode(archived.bytes);
+    expect(persisted).toContain(TRACE_BLOB_MARKER);
+    expect(findTraceBlobRefs(row)).toEqual([]);
     expect(persisted).not.toContain("data:image/png;base64");
     expect(persisted).not.toContain(btoa(imageBinary));
     expect(persisted).not.toContain(largeText.slice(0, 1_000));
@@ -239,7 +228,8 @@ describe("host-owned blob ingestion", () => {
         await ingest(testBackend, body, {
           put: async (object) => {
             attemptedKeys.push(object.key);
-            throw new Error("simulated storage outage");
+            if (object.key.endsWith(".json")) throw new Error("simulated storage outage");
+            await storage.adapter.put(object);
           },
         })
       ).status,
@@ -248,8 +238,17 @@ describe("host-owned blob ingestion", () => {
       await testBackend.run(async (ctx) => await ctx.db.query("spans").collect()),
     ).toHaveLength(0);
 
-    expect((await ingest(testBackend, body, storage.adapter)).status).toBe(202);
-    expect([...storage.objects.keys()]).toEqual(attemptedKeys);
+    expect(attemptedKeys).toHaveLength(2);
+    const retryKeys: string[] = [];
+    const retry = {
+      put: async (object: TraceBlobPut) => {
+        retryKeys.push(object.key);
+        await storage.adapter.put(object);
+      },
+    };
+    expect((await ingest(testBackend, body, retry)).status).toBe(202);
+    expect(retryKeys).toEqual(attemptedKeys);
+    expect((await onlySpan(testBackend)).payload?.key).toBe(attemptedKeys[1]);
     expect((await ingest(testBackend, body, storage.adapter)).status).toBe(204);
     expect([...storage.objects.keys()]).toEqual(attemptedKeys);
   });
@@ -283,8 +282,10 @@ describe("host-owned blob ingestion", () => {
       delivery({ messages: [{ role: "user", content: "data: inspect" }] }),
     );
     expect((await ingest(testBackend, body, storage.adapter)).status).toBe(202);
-    expect((await onlySpan(testBackend)).input).toContain("data: inspect");
-    expect(storage.objects.size).toBe(0);
+    const row = await onlySpan(testBackend);
+    const span = await loadFullSpan(storage.reader, row, { maxBytes: 2048 });
+    expect(span?.input).toContain("data: inspect");
+    expect(storage.objects.size).toBe(1);
   });
 
   it("externalizes JSON with unsafe number lexemes without rewriting its bytes", async () => {
@@ -297,32 +298,42 @@ describe("host-owned blob ingestion", () => {
         .status,
     ).toBe(202);
 
-    const span = await onlySpan(testBackend);
+    const row = await onlySpan(testBackend);
+    const span = await loadFullSpan(storage.reader, row, { maxBytes: 2048 });
+    if (!span) throw new Error("expected archived span");
     const references = findTraceBlobRefs(span);
     expect(references).toHaveLength(1);
     const reference = references[0];
     if (!reference) throw new Error("expected exact JSON reference");
+    const archived = row.payload && storage.objects.get(row.payload.key);
+    if (!archived) throw new Error("expected archived object");
+    expect(new TextDecoder().decode(archived.bytes)).toContain(reference.key);
+    expect(findTraceBlobRefs(row)).toEqual([]);
     expect(reference.contentType).toBe("application/json");
     const resolved = await resolveTraceBlob(storage.reader, span, reference, { maxBytes: 2048 });
     expect(new TextDecoder().decode(resolved?.bytes)).toBe(exactInput);
   });
 
-  it("rejects direct prepared writes that still contain externalizable content", async () => {
+  it("rejects an archived span whose bytes do not match its digest", async () => {
     const testBackend = backend();
-    const parsed = {
-      traceId: "trace",
-      spanId: "span",
-      name: "unsafe",
-      input: JSON.stringify({ image: "data:image/png;base64,AQIDBA==" }),
-      attributes: [],
-      resourceAttributes: [],
-    };
-    await expect(
-      testBackend.mutation(api.ingest.admitPrepared, { spans: [parsed] }),
-    ).resolves.toMatchObject({ kind: "rejected", status: 413 });
+    const storage = memoryStorage();
     expect(
-      await testBackend.run(async (ctx) => await ctx.db.query("spans").collect()),
-    ).toHaveLength(0);
+      (await ingest(testBackend, JSON.stringify(delivery({ prompt: "original" })), storage.adapter))
+        .status,
+    ).toBe(202);
+
+    const row = await onlySpan(testBackend);
+    const object = row.payload && storage.objects.get(row.payload.key);
+    if (!object) throw new Error("expected archived object");
+    const tampered = new TextDecoder().decode(object.bytes).replace("original", "modified");
+    const bytes = new TextEncoder().encode(tampered);
+    expect(bytes).not.toEqual(object.bytes);
+    expect(bytes.byteLength).toBe(object.byteLength);
+    await storage.adapter.put({ ...object, bytes });
+
+    await expect(loadFullSpan(storage.reader, row, { maxBytes: 2048 })).rejects.toThrow(
+      "archived span does not match its reference",
+    );
   });
 
   it("fails bounded retrieval on oversize, wrong membership, length, and digest", async () => {
@@ -344,6 +355,11 @@ describe("host-owned blob ingestion", () => {
     await expect(resolveTraceBlob(reader, {}, reference, { maxBytes: 4 })).rejects.toThrow(
       "does not belong",
     );
+    await expect(
+      resolveTraceBlob({ get: async () => ({ bytes: new Uint8Array(3) }) }, span, reference, {
+        maxBytes: 4,
+      }),
+    ).rejects.toBeInstanceOf(TraceContentInvalidError);
     await expect(resolveTraceBlob(reader, span, reference, { maxBytes: 4 })).rejects.toBeInstanceOf(
       TraceContentInvalidError,
     );

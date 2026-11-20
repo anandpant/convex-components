@@ -16,8 +16,8 @@ import {
   InvalidOtlpDeliveryError,
   OtlpBoundExceededError,
   parseOpenRouterOtlpDelivery,
-  storedOpenRouterSpanSize,
 } from "./component/parser.js";
+import { archiveSpan } from "./spanArchive.js";
 
 type ActionContext = Pick<GenericActionCtx<GenericDataModel>, "runMutation">;
 const BEARER_PREFIX = "Bearer ";
@@ -28,6 +28,8 @@ export type OpenRouterTraceHandlerOptions = {
   bearerToken: string | undefined;
   blobStorage: TraceBlobStorage;
   blobPrefix?: string;
+  /** Key prefix for each span's archived content object. */
+  spanPrefix?: string;
   limits?: TraceBlobLimits;
   mapRemoteUrl?: RemoteTraceBlobMapper;
 };
@@ -171,11 +173,6 @@ async function prepareDelivery(bytes: Uint8Array, options: OpenRouterTraceHandle
       statusJson: restoreContentString(prepared.status),
     };
   });
-  for (const span of spans) {
-    if (storedOpenRouterSpanSize(span) > 900 * 1024) {
-      throw new OtlpBoundExceededError("stored span exceeds the limit of 921600 bytes");
-    }
-  }
   return { delivery, spans, planned: externalized.planned };
 }
 
@@ -215,12 +212,8 @@ function restoreContentString(value: unknown) {
   throw new TraceContentInvalidError("prepared content wrapper is invalid");
 }
 
-function responseForAdmission(admission: { kind: string; admitted?: number }) {
-  if (admission.kind === "rejected")
-    return new Response("Prepared content rejected", { status: 413 });
-  if (admission.kind === "unavailable")
-    return new Response("Admission unavailable", { status: 503 });
-  return new Response(null, { status: (admission.admitted ?? 0) === 0 ? 204 : 202 });
+function responseForAdmission(admission: { admitted: number }) {
+  return new Response(null, { status: admission.admitted === 0 ? 204 : 202 });
 }
 
 export async function handleOpenRouterTraceRequest(
@@ -244,9 +237,11 @@ export async function handleOpenRouterTraceRequest(
       return new Response(null, { status: 204 });
     }
     for (const object of prepared.planned) await options.blobStorage.put(object);
-    const admission = await ctx.runMutation(options.component.ingest.admitPrepared, {
-      spans: prepared.spans,
-    });
+    const spans = [];
+    for (const span of prepared.spans) {
+      spans.push(await archiveSpan(span, options.blobStorage, options.spanPrefix));
+    }
+    const admission = await ctx.runMutation(options.component.ingest.admitPrepared, { spans });
     return responseForAdmission(admission);
   } catch (error) {
     if (

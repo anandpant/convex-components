@@ -2,11 +2,6 @@ import openrouterObservability from "@shpitdev/convex-openrouter-observability/c
 import { defineApp } from "convex/server";
 const app = defineApp();
 
-app.use(openrouterObservability, {
-  name: "openrouterObservability",
-  env: {
-    RETENTION_DAYS: "30",
-  },
-});
+app.use(openrouterObservability, { name: "openrouterObservability" });
 
 export default app;

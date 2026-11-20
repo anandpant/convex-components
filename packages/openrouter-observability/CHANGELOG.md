@@ -6,7 +6,7 @@
 - `loadFullSpan(reader, row, { maxBytes })` returns a span's full content in an action and checks the object's length and digest. `archiveSpan` lets a host admit a span it prepared itself.
 - `getSpan` replaces `exportFullSpan` and returns the stored row. `pageCorrelationSummaries` keeps the request, run, and job correlations and returns up to 25 summaries per page.
 - Removed: `pageTraceSummaries`, `pageRecentSummaries`, `getCorrelationProjectionCoverage`, the session, user, entity, root-execution and OpenCode-session correlations and their indexes, the `by_received` index, retention (`RETENTION_DAYS` and its cron), and the Prismantix and correlation migrations. Spans are kept indefinitely. Deduplication uses the span table's own `(traceId, spanId)` index instead of `spanKeys`.
-- Rows stored before 0.5.0 keep their content inline and still summarize and load. A host migrates them to archived objects; 0.6.0 removes the inline form and the unused `spanKeys`, `deliveries` and `migrationState` tables.
+- Rows stored before 0.5.0 keep their content inline and still summarize and load. The temporary `archiveMigration` functions let a host script page those rows and mark each one archived after it has written and confirmed its object; 0.6.0 removes them with the inline form and the unused `spanKeys`, `deliveries` and `migrationState` tables.
 
 Breaking change: remove `env.RETENTION_DAYS` from `app.use`, pass `spanPrefix`, and read content through `getSpan` and `loadFullSpan` in an action.
 

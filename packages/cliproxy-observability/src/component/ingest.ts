@@ -9,6 +9,34 @@ const bounded = (value: string, limit: number) => {
 const identity = (value: string) => {
   if (!/^[a-f0-9]{64}$/.test(value)) throw new Error("invalid identity");
 };
+const HEALTH_REFRESH_MS = 60_000;
+const LOSS_COUNTERS = [
+  "droppedObservationsTotal",
+  "lostControlObservationsTotal",
+  "scopeConflictsTotal",
+  "expiredScopesTotal",
+] as const;
+const CONTENT_LOSS_COUNTERS = [
+  "lostBytes",
+  "unknownLosses",
+  "missedCalls",
+  "incompleteCalls",
+  "capacityRejections",
+] as const;
+/** When the stored health was observed; segment admission moves `lastObservedAt`, not this. */
+function healthObservedAt(healthJson: string) {
+  return Date.parse((JSON.parse(healthJson) as { observedAt: string }).observedAt);
+}
+/** The counters that report lost or refused capture, as one comparable string. */
+function lossCounters(healthJson: string) {
+  const health = JSON.parse(healthJson) as Record<string, unknown> & {
+    content?: Record<string, unknown>;
+  };
+  return JSON.stringify([
+    ...LOSS_COUNTERS.map((field) => health[field]),
+    ...CONTENT_LOSS_COUNTERS.map((field) => health.content?.[field]),
+  ]);
+}
 export const admit = mutation({
   args: {
     destinationId: v.string(),
@@ -292,6 +320,23 @@ export const recordHealth = mutation({
       counterScope: "plugin_boot",
       precommitCoverage: "unknown_before_local_commit",
     });
+    const status = await ctx.db
+      .query("sourceStatus")
+      .withIndex("by_source", (q) =>
+        q.eq("destinationId", args.destinationId).eq("instanceId", args.instanceId),
+      )
+      .unique();
+    // Senders post every few seconds. Between minute refreshes, only a new boot or a moved loss
+    // counter is worth a write; progress counters wait for the next refresh. A coalesced post is
+    // still acknowledged as committed: the exporter quarantines a delivery that is not.
+    if (
+      status?.healthJson !== undefined &&
+      status.pluginBootId === args.pluginBootId &&
+      at >= healthObservedAt(status.healthJson) &&
+      at - healthObservedAt(status.healthJson) < HEALTH_REFRESH_MS &&
+      lossCounters(status.healthJson) === lossCounters(healthJson)
+    )
+      return { committed: true };
     const boot = await ctx.db
       .query("bootHealth")
       .withIndex("by_boot", (q) =>
@@ -311,12 +356,6 @@ export const recordHealth = mutation({
       });
     else if (at >= boot.observedAt)
       await ctx.db.patch("bootHealth", boot._id, { observedAt: at, healthJson });
-    const status = await ctx.db
-      .query("sourceStatus")
-      .withIndex("by_source", (q) =>
-        q.eq("destinationId", args.destinationId).eq("instanceId", args.instanceId),
-      )
-      .unique();
     const row = {
       destinationId: args.destinationId,
       instanceId: args.instanceId,

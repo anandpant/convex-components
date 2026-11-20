@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.10
+
+- `recordHealth` coalesces routine health posts: a post from the same boot within a minute of the stored health, with the same loss counters (dropped, lost-control, scope-conflict and expired observations; lost bytes, unknown losses, missed and incomplete calls, capacity rejections), is acknowledged as committed without a write. A new boot, any moved loss counter, or a minute's age writes as before. Senders post every two seconds, so this removes about 97% of health writes and most of their reads; stored progress counters can be up to a minute old.
+
 ## 0.3.9
 
 - Native 0.2.6 negotiates registration/reconfigure with host maximum schemas >= 6 while continuing to advertise ABI 1 / producer RPC schema 6 and the same four capture capabilities. This admits stock 8.0.51 without enabling body omission or raw body patching. A newer host maximum does not select a newer callback format; malformed/out-of-range versions and hosts below 6 remain rejected.

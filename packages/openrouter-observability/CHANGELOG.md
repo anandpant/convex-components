@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3
+
+- A redelivered variant is recognized from its variant row as well as the row's capped array, so a known variant past the first eight is no longer recorded again.
+- Temporary `archiveMigration.recordVariants` gives variants recorded before 0.5.2, which exist only in a row's `variants` array, their variant rows, so `pageVariantsSince` sees them. A host script pages it by `_id` like `pageInline`; repeating a page inserts nothing. 0.6.0 removes it with the rest of the module.
+
 ## 0.5.2
 
 - Each recorded variant is also stored as its own row, and `pageVariantsSince` (client `pageVariantsSince`) pages them in creation order, including variants beyond the row's cap of 8, so a downstream copy can pick up variants added to old spans.

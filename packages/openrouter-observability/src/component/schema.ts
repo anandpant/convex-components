@@ -32,7 +32,7 @@ export default defineSchema({
     sha256: v.string(),
     byteLength: v.number(),
     receivedAt: v.number(),
-  }),
+  }).index("by_span_sha", ["spanDocumentId", "sha256"]),
   spans: defineTable(storedSpanFields)
     .index("by_trace_span", ["traceId", "spanId"])
     .index("by_request", ["requestId", "receivedAt"])

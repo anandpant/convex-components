@@ -33,9 +33,15 @@ export const admitPrepared = mutation({
         .first();
       if (existing) {
         if (existing.payload?.sha256 === span.payload.sha256) continue;
-        const known = (existing.variants ?? []).some(
-          (variant) => variant.sha256 === span.payload.sha256,
-        );
+        // The row keeps only the first variants; the variant rows hold every one.
+        const known =
+          (existing.variants ?? []).some((variant) => variant.sha256 === span.payload.sha256) ||
+          (await ctx.db
+            .query("spanVariants")
+            .withIndex("by_span_sha", (q) =>
+              q.eq("spanDocumentId", existing._id).eq("sha256", span.payload.sha256),
+            )
+            .first()) !== null;
         if (known) continue;
         const variantCount = (existing.variantCount ?? 0) + 1;
         await ctx.db.patch("spans", existing._id, {

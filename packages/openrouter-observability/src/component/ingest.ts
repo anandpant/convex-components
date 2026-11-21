@@ -44,6 +44,13 @@ export const admitPrepared = mutation({
             ? { variants: [...(existing.variants ?? []), { ...span.payload, receivedAt }] }
             : {}),
         });
+        await ctx.db.insert("spanVariants", {
+          spanDocumentId: existing._id,
+          traceId: span.traceId,
+          spanId: span.spanId,
+          ...span.payload,
+          receivedAt,
+        });
         stored.push({
           spanDocumentId: existing._id,
           traceId: span.traceId,

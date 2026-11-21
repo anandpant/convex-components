@@ -86,6 +86,11 @@ export class OpenRouterObservability {
     return ctx.runQuery(this.component.queries.pageStoredSince, args);
   }
 
+  /** Recorded variants in creation order, for reconciling a downstream copy. */
+  pageVariantsSince(ctx: ReadContext, args: { after?: number; before?: number; limit?: number }) {
+    return ctx.runQuery(this.component.queries.pageVariantsSince, args);
+  }
+
   /** The stored row; pass it to `loadFullSpan` in an action for its content. */
   getSpan(ctx: ReadContext, args: { spanDocumentId: SpanDocumentId }) {
     return ctx.runQuery(this.component.queries.getSpan, args);

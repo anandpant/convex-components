@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- Each recorded variant is also stored as its own row, and `pageVariantsSince` (client `pageVariantsSince`) pages them in creation order, including variants beyond the row's cap of 8, so a downstream copy can pick up variants added to old spans.
+
 ## 0.5.1
 
 - `handleOpenRouterTraceRequest` takes an optional `onStored` hook. After admission it receives every span the component stored, as a new row or a new variant, with its full prepared content, so a host can forward it downstream without reading the archived object back. A hook failure is logged and never fails the delivery.

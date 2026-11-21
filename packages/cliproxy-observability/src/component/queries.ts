@@ -269,3 +269,59 @@ export const getBootHealth = query({
       )
       .unique(),
 });
+
+const callCursor = v.object({ receivedAt: v.number(), creationTime: v.number() });
+
+/**
+ * Calls in receipt order after `after` and received before `before`, as `getCall` views, for a
+ * host that copies finished calls downstream. At most 50 per page.
+ */
+export const pageCallsSince = query({
+  args: {
+    destinationId: v.string(),
+    after: v.optional(callCursor),
+    before: v.optional(v.number()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.min(Math.max(1, Math.floor(args.limit ?? 50)), 50);
+    const before = args.before ?? Number.MAX_SAFE_INTEGER;
+    const after = args.after;
+    const tied =
+      after === undefined
+        ? []
+        : await ctx.db
+            .query("calls")
+            .withIndex("by_received", (q) =>
+              q
+                .eq("destinationId", args.destinationId)
+                .eq("receivedAt", after.receivedAt)
+                .gt("_creationTime", after.creationTime),
+            )
+            .take(limit + 1);
+    const later = await ctx.db
+      .query("calls")
+      .withIndex("by_received", (q) => {
+        const scoped = q.eq("destinationId", args.destinationId);
+        return after === undefined
+          ? scoped.lt("receivedAt", before)
+          : scoped.gt("receivedAt", after.receivedAt).lt("receivedAt", before);
+      })
+      .take(limit + 1 - Math.min(tied.length, limit + 1));
+    const rows = [...tied, ...later].filter((row) => row.receivedAt < before);
+    const page = [];
+    for (const row of rows.slice(0, limit)) {
+      page.push({
+        ...row,
+        summaryJson: JSON.stringify(await summaryView(ctx, row)),
+        checkpointJson: undefined,
+      });
+    }
+    const last = page.at(-1);
+    return {
+      page,
+      cursor: last ? { receivedAt: last.receivedAt, creationTime: last._creationTime } : after,
+      done: rows.length <= limit,
+    };
+  },
+});

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.11
+
+- `pageCallsSince` (client `pageCallsSince`) pages a destination's calls in receipt order, after a `{ receivedAt, creationTime }` cursor and received before an optional cutoff, as `getCall` views (no checkpoint), 50 at most per page. A host uses it to copy finished calls downstream without missing calls that share a timestamp.
+
 ## 0.3.10
 
 - `recordHealth` coalesces routine health posts: a post from the same boot within a minute of the stored health, with the same loss counters (dropped, lost-control, scope-conflict and expired observations; lost bytes, unknown losses, missed and incomplete calls, capacity rejections), is acknowledged as committed without a write. A new boot, any moved loss counter, or a minute's age writes as before. Senders post every two seconds, so this removes about 97% of health writes and most of their reads; stored progress counters can be up to a minute old.

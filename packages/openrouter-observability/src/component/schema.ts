@@ -23,6 +23,16 @@ export default defineSchema({
     spanId: v.string(),
     spanDocumentId: v.id("spans"),
   }),
+  // One row per recorded variant, so a downstream copy can page variants added to old spans.
+  spanVariants: defineTable({
+    spanDocumentId: v.id("spans"),
+    traceId: v.string(),
+    spanId: v.string(),
+    key: v.string(),
+    sha256: v.string(),
+    byteLength: v.number(),
+    receivedAt: v.number(),
+  }),
   spans: defineTable(storedSpanFields)
     .index("by_trace_span", ["traceId", "spanId"])
     .index("by_request", ["requestId", "receivedAt"])

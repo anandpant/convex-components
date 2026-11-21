@@ -45,6 +45,10 @@ export class CliproxyObservability {
   ) {
     return this.pageRecentSummaries(ctx, args);
   }
+  /** Calls in receipt order, for copying finished calls downstream. */
+  pageCallsSince(ctx: ReadContext, args: FunctionArgs<ComponentApi["queries"]["pageCallsSince"]>) {
+    return ctx.runQuery(this.component.queries.pageCallsSince, args);
+  }
   getCall(ctx: ReadContext, args: { destinationId: string; callId: string }) {
     return ctx.runQuery(this.component.queries.getCall, args);
   }

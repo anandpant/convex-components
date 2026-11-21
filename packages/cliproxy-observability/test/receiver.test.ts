@@ -1093,3 +1093,35 @@ it("coalesces routine health posts to one write a minute and writes losses and n
   expect(await stored()).toEqual([expect.objectContaining({ pluginBootId: "newer-boot" })]);
   expect(await s.backend.run((ctx) => ctx.db.query("bootHealth").collect())).toHaveLength(2);
 });
+it("pages calls in receipt order across tied timestamps, before a cutoff, without repeats", async () => {
+  const s = setup();
+  for (let i = 0; i < 7; i++)
+    expect(
+      (await s.post(await envelope(events.map((o) => ({ ...o, requestId: `ordered-${i}` })))))
+        .status,
+    ).toBe(200);
+  await s.backend.run(async (ctx) => {
+    const rows = await ctx.db.query("calls").collect();
+    for (const [index, row] of rows.entries())
+      await ctx.db.patch("calls", row._id, { receivedAt: index < 4 ? 100 : 200 + index });
+  });
+  const seen: string[] = [];
+  let after: { receivedAt: number; creationTime: number } | undefined;
+  for (let i = 0; i < 10; i++) {
+    const result = await s.backend.query(api.queries.pageCallsSince, {
+      destinationId: events[0]!.destinationId,
+      after,
+      before: 206,
+      limit: 2,
+    });
+    for (const call of result.page) {
+      expect(call.receivedAt).toBeLessThan(206);
+      expect(call).not.toHaveProperty("checkpointJson", expect.anything());
+      seen.push(call.callId);
+    }
+    after = result.cursor;
+    if (result.done) break;
+  }
+  expect(seen).toHaveLength(6);
+  expect(new Set(seen).size).toBe(6);
+});

@@ -3,7 +3,8 @@ import { mutation, query } from "./_generated/server.js";
 import { spanPayloadRef } from "./spanValues.js";
 
 // Temporary: moves rows stored before 0.5.0 to archived objects. A host script pages inline
-// rows, writes and confirms each object, then marks the row. 0.6.0 removes this module.
+// rows, writes and confirms each object, then marks the row. It also records the variants
+// kept on rows before 0.5.2 as variant rows. 0.6.0 removes this module.
 
 /** A page stops after the row that passes 8 MiB; inline rows are at most ~900 KiB, so a page
  * and a batch of its marks stay under the 16 MiB read and return limits. */
@@ -67,5 +68,48 @@ export const markArchived = mutation({
       });
     }
     return { archived: items.length };
+  },
+});
+
+/**
+ * Give every variant on the rows after `after`, in `_id` order, its variant row. Variants recorded
+ * before 0.5.2 exist only in the row's capped `variants` array. Repeating a page inserts nothing.
+ * Run it after the inline rows are archived, so a page reads slim rows; it stops at the same row
+ * and byte bounds as `pageInline` either way.
+ */
+export const recordVariants = mutation({
+  args: { after: v.optional(v.id("spans")) },
+  handler: async (ctx, args) => {
+    let bytes = 0;
+    let rows = 0;
+    let recorded = 0;
+    let last = null;
+    const scan = ctx.db
+      .query("spans")
+      .withIndex("by_id", (q) => (args.after === undefined ? q : q.gt("_id", args.after)));
+    for await (const row of scan) {
+      rows += 1;
+      last = row._id;
+      bytes += getConvexSize(row);
+      for (const { receivedAt, ...payload } of row.variants ?? []) {
+        const existing = await ctx.db
+          .query("spanVariants")
+          .withIndex("by_span_sha", (q) =>
+            q.eq("spanDocumentId", row._id).eq("sha256", payload.sha256),
+          )
+          .first();
+        if (existing) continue;
+        await ctx.db.insert("spanVariants", {
+          spanDocumentId: row._id,
+          traceId: row.traceId,
+          spanId: row.spanId,
+          ...payload,
+          receivedAt,
+        });
+        recorded += 1;
+      }
+      if (rows >= PAGE_ROWS || bytes >= PAGE_BYTES) return { recorded, last, done: false };
+    }
+    return { recorded, last, done: true };
   },
 });

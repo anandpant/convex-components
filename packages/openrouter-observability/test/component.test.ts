@@ -382,6 +382,59 @@ describe("OpenRouter observability component", () => {
     }
   });
 
+  it("does not record a known variant past the row's cap twice", async () => {
+    const backend = createBackend();
+    const storage = memoryStorage();
+    const deliver = (name: string) =>
+      post(
+        backend,
+        JSON.stringify(envelope({ traceId: "trace", spanId: "span", name })),
+        JSON_HEADERS,
+        storage.adapter,
+      );
+    for (let index = 0; index <= 10; index++) await deliver(`name ${index}`);
+    await deliver("name 10");
+    const [row] = await storedSpans(backend);
+    expect(row?.variantCount).toBe(10);
+    const variantRows = await backend.run((ctx) => ctx.db.query("spanVariants").collect());
+    expect(variantRows).toHaveLength(10);
+  });
+
+  it("records variants kept only on the row, once", async () => {
+    const backend = createBackend();
+    const variants = [1, 2].map((index) => ({
+      key: `test/spans/trace/span/${index}.json`,
+      sha256: String(index).repeat(64),
+      byteLength: 10,
+      receivedAt: 100 + index,
+    }));
+    const spanDocumentId = await backend.run((ctx) =>
+      ctx.db.insert("spans", {
+        traceId: "trace",
+        spanId: "span",
+        name: "span",
+        receivedAt: 100,
+        payload: { key: "test/spans/trace/span/0.json", sha256: "0".repeat(64), byteLength: 10 },
+        variants,
+        variantCount: 2,
+      }),
+    );
+    await backend.run((ctx) =>
+      ctx.db.insert("spans", { traceId: "t2", spanId: "s2", name: "other", receivedAt: 1 }),
+    );
+    expect(await backend.mutation(api.archiveMigration.recordVariants, {})).toMatchObject({
+      recorded: 2,
+      done: true,
+    });
+    expect(await backend.mutation(api.archiveMigration.recordVariants, {})).toMatchObject({
+      recorded: 0,
+    });
+    const rows = await backend.run((ctx) => ctx.db.query("spanVariants").collect());
+    expect(
+      rows.map(({ spanDocumentId: id, sha256, receivedAt }) => [id, sha256, receivedAt]),
+    ).toEqual(variants.map(({ sha256, receivedAt }) => [spanDocumentId, sha256, receivedAt]));
+  });
+
   it("pages stored rows in creation order without repeats", async () => {
     const backend = createBackend();
     for (let index = 0; index < 5; index++) {

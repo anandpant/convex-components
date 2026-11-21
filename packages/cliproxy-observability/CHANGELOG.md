@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.12
+
+- `pageEventSegments` returns up to 200 segments per page (was 8), so a host can collect a long call's segment references in a few queries. The default stays 7.
+
 ## 0.3.11
 
 - `pageCallsSince` (client `pageCallsSince`) pages a destination's calls in receipt order, after a `{ receivedAt, creationTime }` cursor and received before an optional cutoff, as `getCall` views (no checkpoint), 50 at most per page. A host uses it to copy finished calls downstream without missing calls that share a timestamp.

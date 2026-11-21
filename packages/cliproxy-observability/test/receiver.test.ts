@@ -457,6 +457,14 @@ it("waits for missing segments and resumes without duplicate projections", async
     progressed: false,
   });
 });
+it("pages a call's segments up to 200 at a time", async () => {
+  const s = setup();
+  for (const o of events) expect((await s.post(await envelope([o]))).status).toBe(200);
+  const args = { destinationId: events[0]!.destinationId, callId: await callIdentity(events[0]!) };
+  const page = await s.backend.query(api.queries.pageEventSegments, { ...args, limit: 500 });
+  expect(page.segments).toHaveLength(events.length);
+  expect(page.done).toBe(true);
+});
 it("requires manifest ownership and verifies private blob integrity", async () => {
   const s = setup();
   await s.post(await envelope());

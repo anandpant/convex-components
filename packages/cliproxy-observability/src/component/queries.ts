@@ -83,7 +83,8 @@ export const getProcessingState = query({
 export const pageEventSegments = query({
   args: { ...owner, afterSequence: v.optional(v.number()), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const limit = Math.max(1, Math.min(8, Math.floor(args.limit ?? 7)));
+    // Segment rows hold only a reference, so 200 stay well under the read and return limits.
+    const limit = Math.max(1, Math.min(200, Math.floor(args.limit ?? 7)));
     const rows = await ctx.db
       .query("segments")
       .withIndex("by_sequence", (q) =>

@@ -356,6 +356,32 @@ describe("OpenRouter observability component", () => {
     error.mockRestore();
   });
 
+  it("pages every recorded variant in creation order, past the row's cap", async () => {
+    const backend = createBackend();
+    const storage = memoryStorage();
+    for (let index = 0; index < 11; index++) {
+      await post(
+        backend,
+        JSON.stringify(envelope({ traceId: "trace", spanId: "span", name: `name ${index}` })),
+        JSON_HEADERS,
+        storage.adapter,
+      );
+    }
+    const variants: string[] = [];
+    let after: number | undefined;
+    for (let page = 0; page < 10; page++) {
+      const result = await backend.query(api.queries.pageVariantsSince, { after, limit: 3 });
+      variants.push(...result.page.map((row) => row.payload.sha256));
+      after = result.cursor;
+      if (result.done) break;
+    }
+    expect(variants).toHaveLength(10);
+    expect(new Set(variants).size).toBe(10);
+    for (const sha256 of variants) {
+      expect([...storage.objects.values()].some((object) => object.sha256 === sha256)).toBe(true);
+    }
+  });
+
   it("pages stored rows in creation order without repeats", async () => {
     const backend = createBackend();
     for (let index = 0; index < 5; index++) {

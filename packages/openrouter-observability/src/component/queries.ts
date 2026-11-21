@@ -239,3 +239,35 @@ export const pageStoredSince = query({
     };
   },
 });
+
+/** Recorded variants in creation order after `after`, including those beyond the row's cap. */
+export const pageVariantsSince = query({
+  args: {
+    after: v.optional(v.number()),
+    before: v.optional(v.number()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = boundedLimit(args.limit, 200);
+    const rows = await ctx.db
+      .query("spanVariants")
+      .withIndex("by_creation_time", (q) => {
+        const lower = args.after === undefined ? q : q.gt("_creationTime", args.after);
+        return args.before === undefined ? lower : lower.lt("_creationTime", args.before);
+      })
+      .take(limit + 1);
+    const page = rows.slice(0, limit).map((row) => ({
+      creationTime: row._creationTime,
+      spanDocumentId: row.spanDocumentId,
+      traceId: row.traceId,
+      spanId: row.spanId,
+      payload: { key: row.key, sha256: row.sha256, byteLength: row.byteLength },
+      receivedAt: row.receivedAt,
+    }));
+    return {
+      page,
+      cursor: page.length === 0 ? args.after : page[page.length - 1]?.creationTime,
+      done: rows.length <= limit,
+    };
+  },
+});

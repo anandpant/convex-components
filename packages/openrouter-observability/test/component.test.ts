@@ -419,7 +419,9 @@ describe("OpenRouter observability component", () => {
         variantCount: 2,
       }),
     );
-    await backend.run((ctx) => ctx.db.insert("spans", { traceId: "t2", spanId: "s2", name: "other", receivedAt: 1 }));
+    await backend.run((ctx) =>
+      ctx.db.insert("spans", { traceId: "t2", spanId: "s2", name: "other", receivedAt: 1 }),
+    );
     expect(await backend.mutation(api.archiveMigration.recordVariants, {})).toMatchObject({
       recorded: 2,
       done: true,
@@ -428,9 +430,9 @@ describe("OpenRouter observability component", () => {
       recorded: 0,
     });
     const rows = await backend.run((ctx) => ctx.db.query("spanVariants").collect());
-    expect(rows.map(({ spanDocumentId: id, sha256, receivedAt }) => [id, sha256, receivedAt])).toEqual(
-      variants.map(({ sha256, receivedAt }) => [spanDocumentId, sha256, receivedAt]),
-    );
+    expect(
+      rows.map(({ spanDocumentId: id, sha256, receivedAt }) => [id, sha256, receivedAt]),
+    ).toEqual(variants.map(({ sha256, receivedAt }) => [spanDocumentId, sha256, receivedAt]));
   });
 
   it("pages stored rows in creation order without repeats", async () => {
